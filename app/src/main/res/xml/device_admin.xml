@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Device Admin policy for BatteryGuard.
+    force-lock         — lockNow()
+    lock-task          — setLockTaskPackages() + startLockTask()
+    disable-status-bar — setStatusBarDisabled()
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+        <lock-task />
+        <disable-status-bar />
+    </uses-policies>
+</device-admin>

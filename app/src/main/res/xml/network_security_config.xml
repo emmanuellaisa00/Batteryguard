@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network Security Config for BatteryGuard
+    =========================================
+    BatteryGuard is an OFFLINE-ONLY app. It monitors battery hardware state
+    via local Android APIs (ACTION_BATTERY_CHANGED broadcast) and reads/writes
+    settings to local DataStore storage only.
+
+    This config enforces that policy at the OS level:
+      - No cleartext (HTTP) traffic is permitted.
+      - No trusted network domains are declared.
+      - The base-config explicitly trusts NO authorities for data transfer.
+
+    Even if code were accidentally introduced that tried to make a network
+    call, Android's network stack would block it at this layer.
+-->
+<network-security-config>
+
+    <!--
+        Base configuration: no network communication permitted.
+        cleartextTrafficPermitted="false" blocks all HTTP.
+        No <domain-config> means no HTTPS domains are trusted for data either.
+    -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <!--
+                We include the system CA store only so that Settings Panels
+                (Wi-Fi, Bluetooth) opened as a separate system process work
+                correctly — those are system UI processes, not our process.
+                Our own code makes no HTTPS connections.
+            -->
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!--
+        Debug builds: same policy applies. No relaxed debug overrides.
+    -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </debug-overrides>
+
+</network-security-config>

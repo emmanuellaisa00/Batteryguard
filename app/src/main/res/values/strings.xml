@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BatteryGuard</string>
+    <string name="device_admin_label">BatteryGuard Admin</string>
+    <string name="device_admin_description">Allows BatteryGuard to lock the device in kiosk mode when battery is critically low.</string>
+    <string name="accessibility_service_description">BatteryGuard monitors active windows to block Quick Settings and enforce kiosk lock when battery is critically low.</string>
+</resources>
