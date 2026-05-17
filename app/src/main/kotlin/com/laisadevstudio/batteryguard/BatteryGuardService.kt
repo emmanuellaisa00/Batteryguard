@@ -101,7 +101,11 @@ class BatteryGuardService : Service() {
         super.onDestroy()
         try { unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(unlockReceiver)  } catch (_: Exception) {}
-        startForegroundService(Intent(applicationContext, BatteryGuardService::class.java))
+        try {
+            startForegroundService(Intent(applicationContext, BatteryGuardService::class.java))
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not restart service: ${e.message}")
+        }
     }
 
     private fun updateNotification(battery: Int, threshold: Int) {

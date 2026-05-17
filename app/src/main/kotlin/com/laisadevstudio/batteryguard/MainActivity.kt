@@ -3,6 +3,7 @@ package com.laisadevstudio.batteryguard
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Bundle
@@ -41,14 +42,6 @@ class MainActivity : ComponentActivity() {
     }
 
 
-    private fun isAccessibilityServiceEnabled(): Boolean {
-        val service = packageName + "/." + KioskAccessibilityService::class.java.simpleName
-        val enabled = android.provider.Settings.Secure.getString(
-            contentResolver,
-            android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: return false
-        return enabled.split(":").any { it.equals(service, ignoreCase = true) }
-    }
     @Composable
     fun SetupScreen() {
         val isAdmin   = dpm.isAdminActive(adminComponent)
@@ -192,13 +185,6 @@ class MainActivity : ComponentActivity() {
                             Uri.parse("package:$packageName")))
                     }
                 )
-                PermCard(
-                    title = "Accessibility Service",
-                    subtitle = "Blocks Quick Settings during lock",
-                    iconRes = R.drawable.ic_shield_lock,
-                    granted = isAccessibilityServiceEnabled(),
-                    onGrant = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-                )
 
                 if (isAdmin && hasOverlay) {
                     Card(
@@ -258,6 +244,12 @@ class MainActivity : ComponentActivity() {
 
     private fun getBatteryLevel(): Int {
         val bm = getSystemService(BATTERY_SERVICE) as BatteryManager
-        return bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val cap = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        if (cap >= 0) return cap
+        // Fallback: read from sticky broadcast (works on emulators too)
+        val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+        return if (level >= 0 && scale > 0) level * 100 / scale else 0
     }
 }
