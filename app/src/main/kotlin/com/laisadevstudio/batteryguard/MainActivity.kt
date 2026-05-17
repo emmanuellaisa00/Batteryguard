@@ -33,6 +33,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var dpm: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
 
+    // Incremented in onResume so SetupScreen recomposes and re-reads live permission state
+    private var permRefreshTick by mutableIntStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         dpm = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
@@ -41,10 +44,17 @@ class MainActivity : ComponentActivity() {
         setContent { BatteryGuardTheme { SetupScreen() } }
     }
 
+    override fun onResume() {
+        super.onResume()
+        permRefreshTick++   // triggers SetupScreen recomposition → permissions re-read
+    }
 
     @Composable
     fun SetupScreen() {
-        val isAdmin   = dpm.isAdminActive(adminComponent)
+        // Read permRefreshTick so this composable recomposes every time the user returns
+        // from a permission screen (onResume bumps the tick)
+        @Suppress("UNUSED_VARIABLE") val tick = permRefreshTick
+        val isAdmin    = dpm.isAdminActive(adminComponent)
         val hasOverlay = Settings.canDrawOverlays(this)
         val threshold = remember { mutableIntStateOf(AppPrefs.getThreshold(this@MainActivity)) }
         val battery   = remember { mutableIntStateOf(getBatteryLevel()) }

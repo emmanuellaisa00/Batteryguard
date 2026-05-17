@@ -22,7 +22,7 @@ class OverlayWindowService : Service() {
         const val TAG = "OverlayWindowService"
         const val CHANNEL_ID = "overlay_channel"
         const val NOTIF_ID = 2001
-        var isRunning = false
+        @Volatile var isRunning = false
     }
 
     private var windowManager: WindowManager? = null

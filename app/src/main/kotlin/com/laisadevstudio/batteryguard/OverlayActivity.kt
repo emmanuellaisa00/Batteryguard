@@ -31,7 +31,10 @@ import com.laisadevstudio.batteryguard.ui.theme.BatteryGuardTheme
 
 class OverlayActivity : ComponentActivity() {
 
-    companion object { const val TAG = "OverlayActivity" }
+    companion object {
+        const val TAG = "OverlayActivity"
+        private const val RECLAIM_DELAY_MS = 250L   // single delay used everywhere
+    }
 
     private lateinit var dpm: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
@@ -82,8 +85,15 @@ class OverlayActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus && BatteryGuardService.isGuardActive) handler.postDelayed(reclaimRunnable, 200)
+        if (!hasFocus && BatteryGuardService.isGuardActive) scheduleReclaim()
         else handler.removeCallbacks(reclaimRunnable)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        // Activity was brought to front by reclaimRunnable — cancel any pending re-post
+        handler.removeCallbacks(reclaimRunnable)
     }
 
     override fun onResume() {
@@ -95,7 +105,12 @@ class OverlayActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        if (BatteryGuardService.isGuardActive) handler.postDelayed(reclaimRunnable, 300)
+        if (BatteryGuardService.isGuardActive) scheduleReclaim()
+    }
+
+    private fun scheduleReclaim() {
+        handler.removeCallbacks(reclaimRunnable)   // never double-post
+        handler.postDelayed(reclaimRunnable, RECLAIM_DELAY_MS)
     }
 
     private fun startKioskLockTask() {

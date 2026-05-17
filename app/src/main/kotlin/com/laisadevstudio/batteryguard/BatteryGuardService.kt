@@ -16,9 +16,9 @@ class BatteryGuardService : Service() {
         const val WARN_NOTIF_ID   = 1002
         const val TAG = "BatteryGuardService"
 
-        var isGuardActive      = false
-        var isCharging         = false
-        var currentBatteryLevel = 100
+        @Volatile var isGuardActive      = false
+        @Volatile var isCharging         = false
+        @Volatile var currentBatteryLevel = 100
 
         // Pre-warn when battery drops to threshold + WARN_MARGIN
         const val WARN_MARGIN = 10
@@ -41,14 +41,21 @@ class BatteryGuardService : Service() {
             val wasActive = isGuardActive
             isGuardActive = currentBatteryLevel < threshold
 
-            // Pre-lock warning
+            // Pre-lock warning: fires between (threshold) and (threshold + WARN_MARGIN)%
             val warnLevel = threshold + WARN_MARGIN
-            if (currentBatteryLevel in threshold..warnLevel && !warnFired && !isCharging) {
-                warnFired = true
-                fireWarningNotification(currentBatteryLevel, threshold)
-            } else if (currentBatteryLevel > warnLevel || isCharging) {
-                warnFired = false
-                clearWarningNotification()
+            when {
+                currentBatteryLevel in (threshold + 1)..warnLevel && !warnFired && !isCharging -> {
+                    warnFired = true
+                    fireWarningNotification(currentBatteryLevel, threshold)
+                }
+                currentBatteryLevel > warnLevel || isCharging -> {
+                    warnFired = false
+                    clearWarningNotification()
+                }
+                isGuardActive -> {
+                    // Battery already below threshold — warning is moot, clear it
+                    clearWarningNotification()
+                }
             }
 
             if (isGuardActive != wasActive)
@@ -66,7 +73,9 @@ class BatteryGuardService : Service() {
             if (intent.action != Intent.ACTION_USER_PRESENT) return
             Log.d(TAG, "Unlocked. Guard=$isGuardActive battery=$currentBatteryLevel%")
             if (isGuardActive) {
-                context.startForegroundService(Intent(context, OverlayWindowService::class.java))
+                // Start overlay service first so it's ready when the activity appears
+                if (!OverlayWindowService.isRunning)
+                    context.startForegroundService(Intent(context, OverlayWindowService::class.java))
                 context.startActivity(Intent(context, OverlayActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                             Intent.FLAG_ACTIVITY_CLEAR_TOP or
