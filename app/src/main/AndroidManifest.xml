@@ -43,9 +43,8 @@
         <activity
             android:name=".OverlayActivity"
             android:exported="false"
-            android:launchMode="singleInstance"
+            android:launchMode="singleTask"
             android:screenOrientation="portrait"
-            android:taskAffinity="com.laisadevstudio.batteryguard.overlay"
             android:theme="@style/Theme.BatteryGuard.Overlay"
             android:showWhenLocked="false"
             android:turnScreenOn="true"

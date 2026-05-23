@@ -4,6 +4,8 @@ import android.app.*
 import android.content.*
 import android.content.pm.ServiceInfo
 import android.os.*
+import android.os.PowerManager
+import android.app.KeyguardManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 
@@ -16,11 +18,10 @@ class BatteryGuardService : Service() {
         const val WARN_NOTIF_ID   = 1002
         const val TAG = "BatteryGuardService"
 
-        @Volatile var isGuardActive      = false
-        @Volatile var isCharging         = false
+        @Volatile var isGuardActive       = false
+        @Volatile var isCharging          = false
         @Volatile var currentBatteryLevel = 100
 
-        // Pre-warn when battery drops to threshold + WARN_MARGIN
         const val WARN_MARGIN = 10
         private var warnFired = false
     }
@@ -41,7 +42,7 @@ class BatteryGuardService : Service() {
             val wasActive = isGuardActive
             isGuardActive = currentBatteryLevel < threshold
 
-            // Pre-lock warning: fires between (threshold) and (threshold + WARN_MARGIN)%
+            // Pre-lock warning
             val warnLevel = threshold + WARN_MARGIN
             when {
                 currentBatteryLevel in (threshold + 1)..warnLevel && !warnFired && !isCharging -> {
@@ -52,46 +53,82 @@ class BatteryGuardService : Service() {
                     warnFired = false
                     clearWarningNotification()
                 }
-                isGuardActive -> {
-                    // Battery already below threshold — warning is moot, clear it
-                    clearWarningNotification()
-                }
+                isGuardActive -> clearWarningNotification()
             }
 
             if (isGuardActive != wasActive)
                 Log.d(TAG, "Guard=$isGuardActive battery=$currentBatteryLevel% threshold=$threshold%")
 
+            // Guard just became inactive — tear down overlay
             if (!isGuardActive && OverlayWindowService.isRunning)
                 context.stopService(Intent(context, OverlayWindowService::class.java))
+
+            // Guard just became active — launch overlay immediately if screen is
+            // already on and the user is already past the lock screen
+            if (isGuardActive && !wasActive) {
+                tryLaunchOverlayIfUnlocked(context)
+            }
 
             updateNotification(currentBatteryLevel, threshold)
         }
     }
 
+    // Fires when screen turns on (power button press or charge-connected wake)
+    private val screenOnReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != Intent.ACTION_SCREEN_ON) return
+            Log.d(TAG, "Screen on. Guard=$isGuardActive")
+            if (isGuardActive) {
+                // Small delay so the keyguard state settles before we check it
+                Handler(Looper.getMainLooper()).postDelayed({
+                    tryLaunchOverlayIfUnlocked(context)
+                }, 300)
+            }
+        }
+    }
+
+    // Fires after lock screen is dismissed (PIN/pattern/swipe entered)
     private val unlockReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != Intent.ACTION_USER_PRESENT) return
             Log.d(TAG, "Unlocked. Guard=$isGuardActive battery=$currentBatteryLevel%")
-            if (isGuardActive) {
-                // Start overlay service first so it's ready when the activity appears
-                if (!OverlayWindowService.isRunning)
-                    context.startForegroundService(Intent(context, OverlayWindowService::class.java))
-                context.startActivity(Intent(context, OverlayActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                            Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                            Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-                })
-            }
+            if (isGuardActive) launchOverlay(context)
         }
+    }
+
+    /**
+     * Launch overlay only if the screen is on AND the keyguard is not showing.
+     * This covers: battery drops while screen is already on, or screen wakes
+     * without a lock screen (e.g. swipe-only / no security).
+     */
+    private fun tryLaunchOverlayIfUnlocked(context: Context) {
+        val pm = context.getSystemService(POWER_SERVICE) as PowerManager
+        val km = context.getSystemService(KEYGUARD_SERVICE) as KeyguardManager
+        val screenOn   = pm.isInteractive
+        val keyguardUp = km.isKeyguardLocked
+        Log.d(TAG, "tryLaunchOverlay: screenOn=$screenOn keyguardUp=$keyguardUp")
+        if (screenOn && !keyguardUp) launchOverlay(context)
+        // If keyguard IS up, ACTION_USER_PRESENT will fire after dismissal
+    }
+
+    private fun launchOverlay(context: Context) {
+        if (!OverlayWindowService.isRunning)
+            context.startForegroundService(Intent(context, OverlayWindowService::class.java))
+        context.startActivity(Intent(context, OverlayActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+        })
     }
 
     override fun onCreate() {
         super.onCreate()
         createChannels()
         startForegroundCompat()
-        registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        registerReceiver(unlockReceiver,  IntentFilter(Intent.ACTION_USER_PRESENT))
+        registerReceiver(batteryReceiver,  IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        registerReceiver(unlockReceiver,   IntentFilter(Intent.ACTION_USER_PRESENT))
+        registerReceiver(screenOnReceiver, IntentFilter(Intent.ACTION_SCREEN_ON))
         Log.d(TAG, "BatteryGuardService started")
     }
 
@@ -108,8 +145,9 @@ class BatteryGuardService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        try { unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
-        try { unregisterReceiver(unlockReceiver)  } catch (_: Exception) {}
+        try { unregisterReceiver(batteryReceiver)  } catch (_: Exception) {}
+        try { unregisterReceiver(unlockReceiver)   } catch (_: Exception) {}
+        try { unregisterReceiver(screenOnReceiver) } catch (_: Exception) {}
         try {
             startForegroundService(Intent(applicationContext, BatteryGuardService::class.java))
         } catch (e: Exception) {

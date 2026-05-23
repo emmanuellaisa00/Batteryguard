@@ -21,8 +21,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.*
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.*
-
-
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -33,26 +31,26 @@ class OverlayActivity : ComponentActivity() {
 
     companion object {
         const val TAG = "OverlayActivity"
-        private const val RECLAIM_DELAY_MS = 250L   // single delay used everywhere
+        private const val RECLAIM_DELAY_MS = 250L
     }
 
     private lateinit var dpm: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
     private val handler = Handler(Looper.getMainLooper())
 
+    // Read-only listener — BatteryGuardService is the single writer of shared state
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != Intent.ACTION_BATTERY_CHANGED) return
-            val level  = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-            val scale  = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
-            val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-            if (level < 0 || scale <= 0) return
-            val pct = level * 100 / scale
-            BatteryGuardService.currentBatteryLevel = pct
-            BatteryGuardService.isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                    status == BatteryManager.BATTERY_STATUS_FULL
-            BatteryGuardService.isGuardActive = pct < AppPrefs.getThreshold(context)
+            // Just react to the already-updated state from BatteryGuardService
             if (!BatteryGuardService.isGuardActive) releaseKiosk()
+
+            // Clear screen-on flag while charging so user can sleep screen manually
+            if (BatteryGuardService.isCharging) {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
         }
     }
 
@@ -71,6 +69,7 @@ class OverlayActivity : ComponentActivity() {
         dpm = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
         adminComponent = ComponentName(this, DeviceAdminReceiver::class.java)
 
+        // Keep screen on initially; cleared when charging is detected (see batteryReceiver)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or WindowManager.LayoutParams.FLAG_SECURE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) { setShowWhenLocked(true); setTurnScreenOn(true) }
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -92,7 +91,6 @@ class OverlayActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        // Activity was brought to front by reclaimRunnable — cancel any pending re-post
         handler.removeCallbacks(reclaimRunnable)
     }
 
@@ -109,15 +107,22 @@ class OverlayActivity : ComponentActivity() {
     }
 
     private fun scheduleReclaim() {
-        handler.removeCallbacks(reclaimRunnable)   // never double-post
+        handler.removeCallbacks(reclaimRunnable)
         handler.postDelayed(reclaimRunnable, RECLAIM_DELAY_MS)
     }
 
     private fun startKioskLockTask() {
         try {
-            if (dpm.isDeviceOwnerApp(packageName)) dpm.setLockTaskPackages(adminComponent, arrayOf(packageName))
+            if (dpm.isDeviceOwnerApp(packageName))
+                dpm.setLockTaskPackages(adminComponent, arrayOf(packageName))
             val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
-            if (am.lockTaskModeState == ActivityManager.LOCK_TASK_MODE_NONE) startLockTask()
+            // Only start lock task if not already in any locked/pinned mode
+            // LOCK_TASK_MODE_NONE=0, LOCK_TASK_MODE_LOCKED=1, LOCK_TASK_MODE_PINNED=2
+            if (am.lockTaskModeState == ActivityManager.LOCK_TASK_MODE_NONE) {
+                startLockTask()
+            } else {
+                Log.d(TAG, "Already in lock task mode (${am.lockTaskModeState}) — skipping startLockTask")
+            }
         } catch (e: Exception) { Log.e(TAG, "startLockTask: ${e.message}") }
     }
 
@@ -142,9 +147,11 @@ class OverlayActivity : ComponentActivity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?) = when (keyCode) {
+        // KEYCODE_POWER intentionally NOT in this list — OS must handle it so the
+        // power button can still sleep the screen (fixes "screen stays on forever" bug)
         KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_APP_SWITCH,
         KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN,
-        KeyEvent.KEYCODE_POWER, KeyEvent.KEYCODE_CAMERA -> true
+        KeyEvent.KEYCODE_CAMERA -> true
         else -> super.onKeyDown(keyCode, event)
     }
 
@@ -176,10 +183,10 @@ class OverlayActivity : ComponentActivity() {
         }
 
         val batteryColor = when {
-            battery.intValue < 15           -> Color(0xFFFF1744)
-            battery.intValue < threshold    -> Color(0xFFFF6B35)
-            battery.intValue < threshold + 10 -> Color(0xFFFFAB00)
-            else                            -> Color(0xFF00E676)
+            battery.intValue < 15                     -> Color(0xFFFF1744)
+            battery.intValue < threshold              -> Color(0xFFFF6B35)
+            battery.intValue < threshold + 10         -> Color(0xFFFFAB00)
+            else                                      -> Color(0xFF00E676)
         }
 
         Box(
@@ -196,7 +203,6 @@ class OverlayActivity : ComponentActivity() {
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 28.dp, vertical = 48.dp)
             ) {
-                // ── Header ──────────────────────────────────────────────
                 Icon(
                     painter = painterResource(R.drawable.ic_shield_lock),
                     contentDescription = null,
@@ -209,7 +215,6 @@ class OverlayActivity : ComponentActivity() {
                     color = Color.White, letterSpacing = 3.sp
                 )
 
-                // ── Animated Battery ─────────────────────────────────────
                 AnimatedBattery(
                     level = battery.intValue,
                     threshold = threshold,
@@ -217,14 +222,12 @@ class OverlayActivity : ComponentActivity() {
                     color = batteryColor
                 )
 
-                // ── Charging status ──────────────────────────────────────
                 if (charging.value) {
                     ChargingStatusCard(battery.intValue, threshold, batteryColor)
                 } else {
                     NotChargingCard(battery.intValue, threshold, batteryColor)
                 }
 
-                // ── Progress toward threshold ────────────────────────────
                 Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("${battery.intValue}%", color = batteryColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -236,7 +239,6 @@ class OverlayActivity : ComponentActivity() {
                     )
                 }
 
-                // ── Pre-lock warning ─────────────────────────────────────
                 if (!charging.value && battery.intValue in threshold..(threshold + BatteryGuardService.WARN_MARGIN)) {
                     WarningCard(battery.intValue, threshold)
                 }
@@ -244,20 +246,16 @@ class OverlayActivity : ComponentActivity() {
         }
     }
 
-    // ── Animated Battery Widget ──────────────────────────────────────────
-
     @Composable
     fun AnimatedBattery(level: Int, threshold: Int, isCharging: Boolean, color: Color) {
         val infiniteTransition = rememberInfiniteTransition(label = "battery")
 
-        // Charging fill animation — rises from current level upward
         val chargeFill by infiniteTransition.animateFloat(
             initialValue = 0f, targetValue = 1f,
             animationSpec = infiniteRepeatable(tween(1800, easing = LinearEasing), RepeatMode.Restart),
             label = "charge_fill"
         )
 
-        // Bolt pulse
         val boltAlpha by infiniteTransition.animateFloat(
             initialValue = 0.4f, targetValue = 1f,
             animationSpec = infiniteRepeatable(tween(700, easing = EaseInOutSine), RepeatMode.Reverse),
@@ -274,7 +272,6 @@ class OverlayActivity : ComponentActivity() {
                 val tipH = 12.dp.toPx()
                 val bodyTop = tipH
 
-                // Battery tip (positive terminal)
                 drawRoundRect(
                     color = color.copy(alpha = 0.6f),
                     topLeft = Offset((w - tipW) / 2f, 0f),
@@ -282,7 +279,6 @@ class OverlayActivity : ComponentActivity() {
                     cornerRadius = CornerRadius(cornerR / 2f)
                 )
 
-                // Battery body outline
                 drawRoundRect(
                     color = color.copy(alpha = 0.3f),
                     topLeft = Offset(strokeW / 2, bodyTop),
@@ -291,20 +287,17 @@ class OverlayActivity : ComponentActivity() {
                     style = Stroke(width = strokeW)
                 )
 
-                // Fill level
                 val fillFraction = level / 100f
                 val bodyInnerH = h - bodyTop - strokeW
                 val fillH = bodyInnerH * fillFraction
                 val fillTop = bodyTop + bodyInnerH - fillH
 
-                // If charging: animated shimmer on top of fill
                 if (isCharging) {
                     val shimmerTop = fillTop - (bodyInnerH * (1f - fillFraction) * chargeFill).coerceAtLeast(0f)
                     drawRoundRect(
                         brush = Brush.verticalGradient(
                             listOf(Color.Transparent, color.copy(alpha = 0.25f), color),
-                            startY = shimmerTop,
-                            endY = h - strokeW
+                            startY = shimmerTop, endY = h - strokeW
                         ),
                         topLeft = Offset(strokeW, shimmerTop),
                         size = Size(w - strokeW * 2, h - strokeW - shimmerTop),
@@ -312,7 +305,6 @@ class OverlayActivity : ComponentActivity() {
                     )
                 }
 
-                // Solid fill
                 if (fillH > 0) {
                     drawRoundRect(
                         brush = Brush.verticalGradient(
@@ -326,7 +318,6 @@ class OverlayActivity : ComponentActivity() {
                 }
             }
 
-            // Center: percentage
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.offset(y = 16.dp)) {
                 if (isCharging) {
                     Icon(
@@ -336,11 +327,7 @@ class OverlayActivity : ComponentActivity() {
                         modifier = Modifier.size(28.dp)
                     )
                 }
-                Text(
-                    "$level%",
-                    fontSize = 38.sp, fontWeight = FontWeight.ExtraBold,
-                    color = Color.White
-                )
+                Text("$level%", fontSize = 38.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
                 Text(
                     if (isCharging) "charging" else "battery",
                     fontSize = 12.sp, color = Color.White.copy(alpha = 0.5f)
@@ -452,9 +439,7 @@ class OverlayActivity : ComponentActivity() {
                     .fillMaxWidth(progress)
                     .fillMaxHeight()
                     .clip(RoundedCornerShape(50))
-                    .background(
-                        Brush.horizontalGradient(listOf(color.copy(alpha = 0.6f), color))
-                    )
+                    .background(Brush.horizontalGradient(listOf(color.copy(alpha = 0.6f), color)))
             )
         }
     }

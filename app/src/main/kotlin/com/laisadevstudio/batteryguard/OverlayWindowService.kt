@@ -14,41 +14,32 @@ import androidx.core.app.NotificationCompat
  *  1. Full-screen opaque overlay — covers recents, settings, all apps
  *  2. Thin status-bar-height touchable strip at top — intercepts QS swipe-down gestures
  *
- * Both views use TYPE_APPLICATION_OVERLAY and sit above the system UI.
+ * FLAG_KEEP_SCREEN_ON is intentionally NOT set here — only OverlayActivity holds it
+ * so the power button can still sleep the screen normally.
+ * State (isGuardActive, currentBatteryLevel, isCharging) is read-only here;
+ * BatteryGuardService is the single writer.
  */
 class OverlayWindowService : Service() {
 
     companion object {
-        const val TAG = "OverlayWindowService"
+        const val TAG        = "OverlayWindowService"
         const val CHANNEL_ID = "overlay_channel"
-        const val NOTIF_ID = 2001
+        const val NOTIF_ID   = 2001
         @Volatile var isRunning = false
     }
 
     private var windowManager: WindowManager? = null
     private var fullOverlay: View? = null
     private var qsBlocker: View? = null
-    private val handler = Handler(Looper.getMainLooper())
 
+    // Read-only listener — only reads state, never writes it
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == Intent.ACTION_BATTERY_CHANGED) {
-                val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-                val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
-                val charging = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1).let {
-                    it == BatteryManager.BATTERY_STATUS_CHARGING ||
-                    it == BatteryManager.BATTERY_STATUS_FULL
-                }
-                if (level >= 0 && scale > 0) {
-                    val pct = level * 100 / scale
-                    BatteryGuardService.currentBatteryLevel = pct
-                    BatteryGuardService.isCharging = charging
-                    BatteryGuardService.isGuardActive = pct < AppPrefs.getThreshold(context)
-                    if (!BatteryGuardService.isGuardActive) {
-                        Log.d(TAG, "Battery OK ($pct%) — removing overlay")
-                        stopSelf()
-                    }
-                }
+            if (intent.action != Intent.ACTION_BATTERY_CHANGED) return
+            // BatteryGuardService is the single source of truth — just check its flag
+            if (!BatteryGuardService.isGuardActive) {
+                Log.d(TAG, "Guard inactive — removing overlay")
+                stopSelf()
             }
         }
     }
@@ -70,29 +61,26 @@ class OverlayWindowService : Service() {
 
     private fun showOverlays() {
         // ── 1. Full-screen opaque overlay ──────────────────────────
+        // FLAG_KEEP_SCREEN_ON intentionally removed — power button must work
         val fullParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.OPAQUE
         ).apply { gravity = Gravity.TOP or Gravity.START }
 
-        val fullView = View(this).apply {
-            setBackgroundColor(Color.parseColor("#050510"))
-        }
+        val fullView = View(this).apply { setBackgroundColor(Color.parseColor("#050510")) }
         fullOverlay = fullView
-        try { windowManager?.addView(fullView, fullParams) } catch (e: Exception) {
-            Log.e(TAG, "fullOverlay: ${e.message}")
-        }
+        try { windowManager?.addView(fullView, fullParams) }
+        catch (e: Exception) { Log.e(TAG, "fullOverlay: ${e.message}") }
 
-        // ── 2. Status-bar-height touch-intercepting QS blocker ─────
+        // ── 2. Status-bar-height QS blocker ─────────────────────────
         val statusBarHeight = resources.getDimensionPixelSize(
             resources.getIdentifier("status_bar_height", "dimen", "android")
-        ).let { if (it > 0) it * 3 else 120 } // grab 3x status bar height to catch swipe
+        ).let { if (it > 0) it * 3 else 120 }
 
         val qsParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -105,13 +93,11 @@ class OverlayWindowService : Service() {
 
         val qsView = View(this).apply {
             setBackgroundColor(Color.TRANSPARENT)
-            // Consume all touches silently — QS swipe goes nowhere
             setOnTouchListener { _, _ -> true }
         }
         qsBlocker = qsView
-        try { windowManager?.addView(qsView, qsParams) } catch (e: Exception) {
-            Log.e(TAG, "qsBlocker: ${e.message}")
-        }
+        try { windowManager?.addView(qsView, qsParams) }
+        catch (e: Exception) { Log.e(TAG, "qsBlocker: ${e.message}") }
     }
 
     override fun onDestroy() {
