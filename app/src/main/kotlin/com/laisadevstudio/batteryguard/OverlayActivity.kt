@@ -26,17 +26,61 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.*
 import com.laisadevstudio.batteryguard.ui.theme.BatteryGuardTheme
+import kotlinx.coroutines.delay
 
 class OverlayActivity : ComponentActivity() {
 
     companion object {
         const val TAG = "OverlayActivity"
         private const val RECLAIM_DELAY_MS = 250L
+        private const val SLEEP_DELAY_MS   = 5_000L  // Sleep screen 5 s after lock activates
     }
 
     private lateinit var dpm: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
     private val handler = Handler(Looper.getMainLooper())
+
+    /** Fires 5 s after guard activates — kills background apps then sleeps the screen. */
+    private val sleepRunnable = Runnable {
+        if (!BatteryGuardService.isGuardActive) return@Runnable
+        Log.d(TAG, "5 s elapsed — killing background apps and sleeping screen")
+        killBackgroundApps()
+        if (dpm.isAdminActive(adminComponent)) {
+            try { dpm.lockNow() }
+            catch (e: Exception) { Log.e(TAG, "lockNow failed: ${e.message}") }
+        } else {
+            Log.w(TAG, "Device admin not active — cannot lock screen via lockNow()")
+        }
+    }
+
+    /**
+     * Kill every background process that isn't:
+     *  - this app itself
+     *  - the Android system / framework
+     */
+    private fun killBackgroundApps() {
+        val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+        val pm = packageManager
+        val runningApps = am.runningAppProcesses ?: return
+        var killed = 0
+        for (proc in runningApps) {
+            if (proc.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) continue
+            for (pkg in proc.pkgList) {
+                if (pkg == packageName) continue               // skip self
+                if (pkg.startsWith("com.android.")) continue   // skip system
+                if (pkg.startsWith("android"))       continue   // skip framework
+                try {
+                    am.killBackgroundProcesses(pkg)
+                    killed++
+                    Log.d(TAG, "Killed: $pkg")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not kill $pkg: ${e.message}")
+                }
+            }
+        }
+        Log.d(TAG, "Killed $killed background processes")
+    }
+
 
     // Read-only listener — BatteryGuardService is the single writer of shared state
     private val batteryReceiver = object : BroadcastReceiver() {
@@ -78,6 +122,7 @@ class OverlayActivity : ComponentActivity() {
         startKioskLockTask()
         disableStatusBar(true)
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        scheduleSleep()
 
         setContent { BatteryGuardTheme { KioskOverlayScreen() } }
     }
@@ -99,11 +144,20 @@ class OverlayActivity : ComponentActivity() {
         handler.removeCallbacks(reclaimRunnable)
         if (BatteryGuardService.isGuardActive && !OverlayWindowService.isRunning)
             startForegroundService(Intent(this, OverlayWindowService::class.java))
+        // Re-arm sleep timer every time the screen comes back on
+        scheduleSleep()
     }
 
     override fun onPause() {
         super.onPause()
         if (BatteryGuardService.isGuardActive) scheduleReclaim()
+    }
+
+    private fun scheduleSleep() {
+        if (!BatteryGuardService.isGuardActive) return
+        handler.removeCallbacks(sleepRunnable)
+        handler.postDelayed(sleepRunnable, SLEEP_DELAY_MS)
+        Log.d(TAG, "Sleep scheduled in 5s")
     }
 
     private fun scheduleReclaim() {
@@ -142,6 +196,7 @@ class OverlayActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(reclaimRunnable)
+        handler.removeCallbacks(sleepRunnable)
         try { unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
         if (!BatteryGuardService.isGuardActive) disableStatusBar(false)
     }
