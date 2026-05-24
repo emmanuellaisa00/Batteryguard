@@ -47,8 +47,8 @@
             android:launchMode="singleTask"
             android:screenOrientation="portrait"
             android:theme="@style/Theme.BatteryGuard.Overlay"
-            android:showWhenLocked="false"
-            android:turnScreenOn="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="false"
             android:excludeFromRecents="true"
             android:noHistory="false"
             android:resizeableActivity="false" />

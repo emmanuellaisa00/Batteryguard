@@ -8,6 +8,7 @@ import android.os.*
 import android.util.Log
 import android.view.KeyEvent
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.*
@@ -26,70 +27,162 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.*
 import com.laisadevstudio.batteryguard.ui.theme.BatteryGuardTheme
-import kotlinx.coroutines.delay
+import kotlin.random.Random
 
 class OverlayActivity : ComponentActivity() {
 
     companion object {
-        const val TAG = "OverlayActivity"
-        private const val RECLAIM_DELAY_MS = 250L
-        private const val SLEEP_DELAY_MS   = 5_000L  // Sleep screen 5 s after lock activates
+        const val TAG              = "OverlayActivity"
+        private const val RECLAIM_DELAY_MS  = 250L
+        private const val SLEEP_DELAY_MS    = 5_000L
+        private const val LOCK_TASK_DELAY_MS = 350L  // let Compose render before "App pinned" toast
+
+        /** 50+ contextual messages shown randomly on the lock screen. */
+        private val LOCK_MESSAGES_CHARGING = listOf(
+            "Hang tight — power is flowing.",
+            "Every percent counts. Keep charging.",
+            "Your battery is on its way back.",
+            "Charging in progress. Won't be long.",
+            "Fueling up — almost there.",
+            "Power incoming. Sit tight.",
+            "Electrons are working for you right now.",
+            "Juice is flowing. Device stays locked until charged.",
+            "Charging session active. Screen stays dim.",
+            "Good call plugging in. Almost unlocked.",
+            "Energy is being stored. Hold on.",
+            "The charger is doing its job.",
+            "Recharging — screen dims to save power.",
+            "Patience pays off. Charging steadily.",
+            "Locked for your own good. Keep charging.",
+            "Battery care = device longevity.",
+            "Smart charging in progress.",
+            "Current flowing. Lock holds until threshold.",
+            "Charging fast? Check your cable quality.",
+            "Low battery saved — charging active.",
+        )
+
+        private val LOCK_MESSAGES_NOT_CHARGING = listOf(
+            "Plug in your charger to regain access.",
+            "Battery too low. Connect a charger.",
+            "Device locked to protect your battery.",
+            "No charger detected. Device stays locked.",
+            "Your battery needs attention. Charge now.",
+            "Low power mode: device is secured.",
+            "Charging is the only way to unlock.",
+            "BatteryGuard is protecting your device.",
+            "Connect a charger to continue using your device.",
+            "Battery critical — plug in immediately.",
+            "Your device is locked until charged.",
+            "Power is low. Connect a charger now.",
+            "Device locked by BatteryGuard. Charge to unlock.",
+            "Protect your battery — charge before it's too late.",
+            "No power source detected. Plug in to unlock.",
+            "Battery protection active. Charger required.",
+            "Lock engaged. Only a charger can open this.",
+            "Your device is in low-battery lockdown.",
+            "Charge your device to restore full access.",
+            "Battery discipline keeps your device healthy.",
+            "Low charge detected. Locking for protection.",
+            "Guard mode engaged. Charger required to proceed.",
+            "Critical battery level reached. Connect power.",
+            "Screen will stay off to conserve power.",
+            "Your device needs power. Plug in now.",
+            "No charging source found. Device stays locked.",
+            "Battery health matters. Charge regularly.",
+            "Power is low — locking device to prevent data loss.",
+            "Connect your charger to restore access.",
+            "Device secured. Battery level insufficient.",
+            "Low power lockdown active.",
+            "BatteryGuard is keeping your data safe.",
+        )
+
+        private val LOCK_MESSAGES_ALMOST = listOf(
+            "Almost there! Just a little more charge.",
+            "So close — keep the charger plugged in.",
+            "Nearly unlocked. Don't unplug yet.",
+            "Threshold approaching. Hang on.",
+            "Just a few more percent to go.",
+            "Almost at the unlock level. Stay plugged in.",
+            "You're close! Keep charging.",
+            "Nearly there — unlock incoming soon.",
+            "Don't unplug now, you're almost at the threshold.",
+            "Final stretch. Keep charging.",
+        )
+
+        fun pickMessage(battery: Int, threshold: Int, isCharging: Boolean): String {
+            val almostDone = isCharging && battery >= threshold - 5 && battery < threshold
+            return when {
+                almostDone     -> LOCK_MESSAGES_ALMOST.random()
+                isCharging     -> LOCK_MESSAGES_CHARGING.random()
+                else           -> LOCK_MESSAGES_NOT_CHARGING.random()
+            }
+        }
     }
 
     private lateinit var dpm: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
     private val handler = Handler(Looper.getMainLooper())
 
-    /** Fires 5 s after guard activates — kills background apps then sleeps the screen. */
+    /**
+     * Set this TRUE immediately before calling dpm.lockNow().
+     * onPause() checks it to skip scheduling reclaimRunnable — which would
+     * otherwise call startActivity(OverlayActivity) and wake the screen.
+     */
+    @Volatile private var suppressNextReclaim = false
+
+    // ── Sleep: 5 s after guard activates, kills bg apps and locks screen ──────
     private val sleepRunnable = Runnable {
         if (!BatteryGuardService.isGuardActive) return@Runnable
-        Log.d(TAG, "5 s elapsed — killing background apps and sleeping screen")
+        Log.d(TAG, "5 s elapsed — sleeping screen")
         killBackgroundApps()
         if (dpm.isAdminActive(adminComponent)) {
-            try { dpm.lockNow() }
-            catch (e: Exception) { Log.e(TAG, "lockNow failed: ${e.message}") }
+            try {
+                suppressNextReclaim = true          // ← CRITICAL: prevents screen from waking
+                dpm.lockNow()
+                Log.d(TAG, "lockNow() succeeded")
+            } catch (e: SecurityException) {
+                suppressNextReclaim = false
+                showError("Screen lock failed: admin permission revoked")
+                Log.e(TAG, "lockNow SecurityException: ${e.message}")
+            } catch (e: Exception) {
+                suppressNextReclaim = false
+                showError("Screen lock failed — try re-granting Device Admin")
+                Log.e(TAG, "lockNow failed: ${e.message}")
+            }
         } else {
+            showError("Device Admin not active — cannot lock screen")
             Log.w(TAG, "Device admin not active — cannot lock screen via lockNow()")
         }
     }
 
-    /**
-     * Kill every background process that isn't:
-     *  - this app itself
-     *  - the Android system / framework
-     */
     private fun killBackgroundApps() {
-        val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
-        val pm = packageManager
-        val runningApps = am.runningAppProcesses ?: return
-        var killed = 0
-        for (proc in runningApps) {
-            if (proc.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) continue
-            for (pkg in proc.pkgList) {
-                if (pkg == packageName) continue               // skip self
-                if (pkg.startsWith("com.android.")) continue   // skip system
-                if (pkg.startsWith("android"))       continue   // skip framework
-                try {
-                    am.killBackgroundProcesses(pkg)
-                    killed++
-                    Log.d(TAG, "Killed: $pkg")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Could not kill $pkg: ${e.message}")
+        try {
+            val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+            val runningApps = am.runningAppProcesses ?: return
+            var killed = 0
+            for (proc in runningApps) {
+                if (proc.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) continue
+                for (pkg in proc.pkgList) {
+                    if (pkg == packageName || pkg.startsWith("com.android.") || pkg.startsWith("android")) continue
+                    try { am.killBackgroundProcesses(pkg); killed++ }
+                    catch (_: Exception) {}
                 }
             }
+            Log.d(TAG, "Killed $killed background processes")
+        } catch (e: Exception) {
+            Log.w(TAG, "killBackgroundApps error: ${e.message}")
         }
-        Log.d(TAG, "Killed $killed background processes")
     }
 
-
-    // Read-only listener — BatteryGuardService is the single writer of shared state
+    // ── Battery receiver (read-only) ──────────────────────────────────────────
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action != Intent.ACTION_BATTERY_CHANGED) return
-            // Just react to the already-updated state from BatteryGuardService
-            if (!BatteryGuardService.isGuardActive) releaseKiosk()
-
-            // Clear screen-on flag while charging so user can sleep screen manually
+            if (!BatteryGuardService.isGuardActive) {
+                releaseKiosk()
+                return
+            }
+            // Screen dims naturally when charging (clear KEEP_SCREEN_ON so display timeout works)
             if (BatteryGuardService.isCharging) {
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             } else {
@@ -98,33 +191,61 @@ class OverlayActivity : ComponentActivity() {
         }
     }
 
+    // ── Reclaim focus if something steals it (NOT after lockNow) ─────────────
     private val reclaimRunnable = Runnable {
         if (!BatteryGuardService.isGuardActive) return@Runnable
         Log.d(TAG, "Reclaiming focus")
-        startActivity(Intent(this, OverlayActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
-                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-        })
+        try {
+            startActivity(Intent(this, OverlayActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Reclaim startActivity failed: ${e.message}")
+        }
     }
 
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        dpm = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
+
+        dpm           = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
         adminComponent = ComponentName(this, DeviceAdminReceiver::class.java)
 
-        // Keep screen on initially; cleared when charging is detected (see batteryReceiver)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or WindowManager.LayoutParams.FLAG_SECURE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) { setShowWhenLocked(true); setTurnScreenOn(true) }
+        // Keep screen on initially (cleared by batteryReceiver when charging)
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+            WindowManager.LayoutParams.FLAG_SECURE
+        )
+        // Show over lock screen, but do NOT auto-turn screen on
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(false)   // ← never auto-wake; only power button should wake
+        }
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        startForegroundService(Intent(this, OverlayWindowService::class.java))
-        startKioskLockTask()
-        disableStatusBar(true)
-        registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        scheduleSleep()
+        // Start overlay service
+        try {
+            startForegroundService(Intent(this, OverlayWindowService::class.java))
+        } catch (e: Exception) {
+            showError("Security overlay service failed to start")
+            Log.e(TAG, "OverlayWindowService start failed: ${e.message}")
+        }
 
+        registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+
+        // ── Render UI FIRST, then start lock task after a brief delay ──────
+        // This prevents the black screen that appears before Compose renders
+        // when the "App is pinned" system toast fires immediately.
         setContent { BatteryGuardTheme { KioskOverlayScreen() } }
+
+        handler.postDelayed({
+            startKioskLockTask()
+            disableStatusBar(true)
+        }, LOCK_TASK_DELAY_MS)
+
+        scheduleSleep()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -141,56 +262,30 @@ class OverlayActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        suppressNextReclaim = false   // reset on resume so future reclaims work
         handler.removeCallbacks(reclaimRunnable)
-        if (BatteryGuardService.isGuardActive && !OverlayWindowService.isRunning)
-            startForegroundService(Intent(this, OverlayWindowService::class.java))
-        // Re-arm sleep timer every time the screen comes back on
+        if (BatteryGuardService.isGuardActive && !OverlayWindowService.isRunning) {
+            try {
+                startForegroundService(Intent(this, OverlayWindowService::class.java))
+            } catch (e: Exception) {
+                Log.e(TAG, "OverlayWindowService re-start failed: ${e.message}")
+            }
+        }
+        // Re-arm sleep timer: screen just came on → 5 s → sleep
         scheduleSleep()
     }
 
     override fun onPause() {
         super.onPause()
-        if (BatteryGuardService.isGuardActive) scheduleReclaim()
-    }
-
-    private fun scheduleSleep() {
-        if (!BatteryGuardService.isGuardActive) return
-        handler.removeCallbacks(sleepRunnable)
-        handler.postDelayed(sleepRunnable, SLEEP_DELAY_MS)
-        Log.d(TAG, "Sleep scheduled in 5s")
-    }
-
-    private fun scheduleReclaim() {
-        handler.removeCallbacks(reclaimRunnable)
-        handler.postDelayed(reclaimRunnable, RECLAIM_DELAY_MS)
-    }
-
-    private fun startKioskLockTask() {
-        try {
-            if (dpm.isDeviceOwnerApp(packageName))
-                dpm.setLockTaskPackages(adminComponent, arrayOf(packageName))
-            val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
-            // Only start lock task if not already in any locked/pinned mode
-            // LOCK_TASK_MODE_NONE=0, LOCK_TASK_MODE_LOCKED=1, LOCK_TASK_MODE_PINNED=2
-            if (am.lockTaskModeState == ActivityManager.LOCK_TASK_MODE_NONE) {
-                startLockTask()
-            } else {
-                Log.d(TAG, "Already in lock task mode (${am.lockTaskModeState}) — skipping startLockTask")
-            }
-        } catch (e: Exception) { Log.e(TAG, "startLockTask: ${e.message}") }
-    }
-
-    private fun disableStatusBar(disabled: Boolean) {
-        if (!dpm.isAdminActive(adminComponent)) return
-        try { @Suppress("DEPRECATION") dpm.setStatusBarDisabled(adminComponent, disabled) }
-        catch (e: Exception) { Log.w(TAG, "setStatusBarDisabled: ${e.message}") }
-    }
-
-    private fun releaseKiosk() {
-        disableStatusBar(false)
-        stopService(Intent(this, OverlayWindowService::class.java))
-        try { stopLockTask() } catch (_: Exception) {}
-        finish()
+        // If we just called lockNow(), do NOT schedule reclaim — that would
+        // call startActivity(OverlayActivity) with setTurnScreenOn waking the screen.
+        val wasSuppressed = suppressNextReclaim
+        suppressNextReclaim = false
+        if (BatteryGuardService.isGuardActive && !wasSuppressed) {
+            scheduleReclaim()
+        } else if (wasSuppressed) {
+            Log.d(TAG, "onPause: reclaim suppressed (we triggered lockNow)")
+        }
     }
 
     override fun onDestroy() {
@@ -201,9 +296,65 @@ class OverlayActivity : ComponentActivity() {
         if (!BatteryGuardService.isGuardActive) disableStatusBar(false)
     }
 
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    private fun scheduleSleep() {
+        if (!BatteryGuardService.isGuardActive) return
+        handler.removeCallbacks(sleepRunnable)
+        handler.postDelayed(sleepRunnable, SLEEP_DELAY_MS)
+        Log.d(TAG, "Sleep scheduled in 5 s")
+    }
+
+    private fun scheduleReclaim() {
+        handler.removeCallbacks(reclaimRunnable)
+        handler.postDelayed(reclaimRunnable, RECLAIM_DELAY_MS)
+    }
+
+    private fun startKioskLockTask() {
+        try {
+            if (dpm.isDeviceOwnerApp(packageName)) {
+                dpm.setLockTaskPackages(adminComponent, arrayOf(packageName))
+            }
+            val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+            if (am.lockTaskModeState == ActivityManager.LOCK_TASK_MODE_NONE) {
+                startLockTask()
+                Log.d(TAG, "Lock task started")
+            } else {
+                Log.d(TAG, "Already in lock task mode (${am.lockTaskModeState})")
+            }
+        } catch (e: IllegalStateException) {
+            showError("Kiosk mode unavailable: ${e.message?.take(60)}")
+            Log.e(TAG, "startLockTask IllegalState: ${e.message}")
+        } catch (e: Exception) {
+            showError("Failed to start kiosk mode — check Device Admin permissions")
+            Log.e(TAG, "startLockTask failed: ${e.message}")
+        }
+    }
+
+    private fun disableStatusBar(disabled: Boolean) {
+        if (!dpm.isAdminActive(adminComponent)) return
+        try {
+            @Suppress("DEPRECATION")
+            dpm.setStatusBarDisabled(adminComponent, disabled)
+        } catch (e: Exception) {
+            Log.w(TAG, "setStatusBarDisabled failed: ${e.message}")
+        }
+    }
+
+    private fun releaseKiosk() {
+        disableStatusBar(false)
+        stopService(Intent(this, OverlayWindowService::class.java))
+        try { stopLockTask() } catch (_: Exception) {}
+        finish()
+    }
+
+    private fun showError(msg: String) {
+        try { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
+        catch (_: Exception) {}
+    }
+
+    // ── Key handling ──────────────────────────────────────────────────────────
     override fun onKeyDown(keyCode: Int, event: KeyEvent?) = when (keyCode) {
-        // KEYCODE_POWER intentionally NOT in this list — OS must handle it so the
-        // power button can still sleep the screen (fixes "screen stays on forever" bug)
+        // KEYCODE_POWER intentionally excluded — OS handles it so power button sleeps screen
         KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_APP_SWITCH,
         KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN,
         KeyEvent.KEYCODE_CAMERA -> true
@@ -211,17 +362,17 @@ class OverlayActivity : ComponentActivity() {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent?) = when (keyCode) {
-        KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_APP_SWITCH,
-        KeyEvent.KEYCODE_MENU -> true
+        KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_HOME,
+        KeyEvent.KEYCODE_APP_SWITCH, KeyEvent.KEYCODE_MENU -> true
         else -> super.onKeyUp(keyCode, event)
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {}
 
-    // ═══════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     //  COMPOSE UI
-    // ═══════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     @Composable
     fun KioskOverlayScreen() {
@@ -229,11 +380,21 @@ class OverlayActivity : ComponentActivity() {
         val charging  = remember { mutableStateOf(BatteryGuardService.isCharging) }
         val threshold = AppPrefs.getThreshold(this)
 
+        // Random contextual message — updates every 12 s so user sees variety
+        val message = remember { mutableStateOf(pickMessage(battery.intValue, threshold, charging.value)) }
+
         LaunchedEffect(Unit) {
             while (true) {
                 battery.intValue = BatteryGuardService.currentBatteryLevel
                 charging.value   = BatteryGuardService.isCharging
                 kotlinx.coroutines.delay(500)
+            }
+        }
+
+        LaunchedEffect(charging.value) {
+            while (true) {
+                message.value = pickMessage(battery.intValue, threshold, charging.value)
+                kotlinx.coroutines.delay(12_000)
             }
         }
 
@@ -271,10 +432,10 @@ class OverlayActivity : ComponentActivity() {
                 )
 
                 AnimatedBattery(
-                    level = battery.intValue,
+                    level     = battery.intValue,
                     threshold = threshold,
                     isCharging = charging.value,
-                    color = batteryColor
+                    color     = batteryColor
                 )
 
                 if (charging.value) {
@@ -283,6 +444,7 @@ class OverlayActivity : ComponentActivity() {
                     NotChargingCard(battery.intValue, threshold, batteryColor)
                 }
 
+                // Progress bar toward threshold
                 Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("${battery.intValue}%", color = batteryColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -290,10 +452,14 @@ class OverlayActivity : ComponentActivity() {
                     }
                     LinearProgressBar(
                         progress = (battery.intValue.toFloat() / threshold.toFloat()).coerceIn(0f, 1f),
-                        color = batteryColor
+                        color    = batteryColor
                     )
                 }
 
+                // Rotating contextual message
+                MessageCard(message.value, batteryColor)
+
+                // Warning if just below threshold
                 if (!charging.value && battery.intValue in threshold..(threshold + BatteryGuardService.WARN_MARGIN)) {
                     WarningCard(battery.intValue, threshold)
                 }
@@ -302,15 +468,48 @@ class OverlayActivity : ComponentActivity() {
     }
 
     @Composable
+    fun MessageCard(message: String, accentColor: Color) {
+        val infiniteTransition = rememberInfiniteTransition(label = "msg")
+        val alpha by infiniteTransition.animateFloat(
+            initialValue = 0.4f, targetValue = 0.7f,
+            animationSpec = infiniteRepeatable(tween(3000, easing = EaseInOutSine), RepeatMode.Reverse),
+            label = "msg_alpha"
+        )
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape    = RoundedCornerShape(12.dp),
+            colors   = CardDefaults.cardColors(containerColor = Color(0xFF0A0A1E))
+        ) {
+            Row(
+                modifier = Modifier.padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(4.dp, 32.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(accentColor.copy(alpha = alpha))
+                )
+                Text(
+                    message,
+                    fontSize = 13.sp,
+                    color    = Color.White.copy(alpha = 0.75f),
+                    fontWeight = FontWeight.Normal,
+                    lineHeight = 20.sp
+                )
+            }
+        }
+    }
+
+    @Composable
     fun AnimatedBattery(level: Int, threshold: Int, isCharging: Boolean, color: Color) {
         val infiniteTransition = rememberInfiniteTransition(label = "battery")
-
         val chargeFill by infiniteTransition.animateFloat(
             initialValue = 0f, targetValue = 1f,
             animationSpec = infiniteRepeatable(tween(1800, easing = LinearEasing), RepeatMode.Restart),
             label = "charge_fill"
         )
-
         val boltAlpha by infiniteTransition.animateFloat(
             initialValue = 0.4f, targetValue = 1f,
             animationSpec = infiniteRepeatable(tween(700, easing = EaseInOutSine), RepeatMode.Reverse),
@@ -319,13 +518,9 @@ class OverlayActivity : ComponentActivity() {
 
         Box(contentAlignment = Alignment.Center, modifier = Modifier.size(180.dp, 220.dp)) {
             Canvas(modifier = Modifier.size(140.dp, 200.dp)) {
-                val w = size.width
-                val h = size.height
-                val strokeW = 6.dp.toPx()
-                val cornerR = 16.dp.toPx()
-                val tipW = w * 0.3f
-                val tipH = 12.dp.toPx()
-                val bodyTop = tipH
+                val w = size.width; val h = size.height
+                val strokeW = 6.dp.toPx(); val cornerR = 16.dp.toPx()
+                val tipW = w * 0.3f; val tipH = 12.dp.toPx(); val bodyTop = tipH
 
                 drawRoundRect(
                     color = color.copy(alpha = 0.6f),
@@ -333,7 +528,6 @@ class OverlayActivity : ComponentActivity() {
                     size = Size(tipW, tipH + cornerR),
                     cornerRadius = CornerRadius(cornerR / 2f)
                 )
-
                 drawRoundRect(
                     color = color.copy(alpha = 0.3f),
                     topLeft = Offset(strokeW / 2, bodyTop),
@@ -341,11 +535,10 @@ class OverlayActivity : ComponentActivity() {
                     cornerRadius = CornerRadius(cornerR),
                     style = Stroke(width = strokeW)
                 )
-
                 val fillFraction = level / 100f
-                val bodyInnerH = h - bodyTop - strokeW
-                val fillH = bodyInnerH * fillFraction
-                val fillTop = bodyTop + bodyInnerH - fillH
+                val bodyInnerH  = h - bodyTop - strokeW
+                val fillH       = bodyInnerH * fillFraction
+                val fillTop     = bodyTop + bodyInnerH - fillH
 
                 if (isCharging) {
                     val shimmerTop = fillTop - (bodyInnerH * (1f - fillFraction) * chargeFill).coerceAtLeast(0f)
@@ -355,11 +548,10 @@ class OverlayActivity : ComponentActivity() {
                             startY = shimmerTop, endY = h - strokeW
                         ),
                         topLeft = Offset(strokeW, shimmerTop),
-                        size = Size(w - strokeW * 2, h - strokeW - shimmerTop),
+                        size    = Size(w - strokeW * 2, h - strokeW - shimmerTop),
                         cornerRadius = CornerRadius(cornerR - strokeW / 2)
                     )
                 }
-
                 if (fillH > 0) {
                     drawRoundRect(
                         brush = Brush.verticalGradient(
@@ -367,19 +559,16 @@ class OverlayActivity : ComponentActivity() {
                             startY = fillTop, endY = h - strokeW
                         ),
                         topLeft = Offset(strokeW, fillTop),
-                        size = Size(w - strokeW * 2, fillH),
+                        size    = Size(w - strokeW * 2, fillH),
                         cornerRadius = CornerRadius(cornerR - strokeW / 2)
                     )
                 }
             }
-
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.offset(y = 16.dp)) {
                 if (isCharging) {
                     Icon(
-                        painter = painterResource(R.drawable.ic_bolt),
-                        contentDescription = null,
-                        tint = color.copy(alpha = boltAlpha),
-                        modifier = Modifier.size(28.dp)
+                        painter = painterResource(R.drawable.ic_bolt), contentDescription = null,
+                        tint = color.copy(alpha = boltAlpha), modifier = Modifier.size(28.dp)
                     )
                 }
                 Text("$level%", fontSize = 38.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
@@ -400,19 +589,13 @@ class OverlayActivity : ComponentActivity() {
             label = "glow"
         )
         Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, color.copy(alpha = glowAlpha), RoundedCornerShape(16.dp)),
-            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth().border(1.dp, color.copy(alpha = glowAlpha), RoundedCornerShape(16.dp)),
+            shape  = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF0A1A0A))
         ) {
-            Row(
-                modifier = Modifier.padding(18.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                Icon(painter = painterResource(R.drawable.ic_plug), null,
-                    tint = color, modifier = Modifier.size(28.dp))
+            Row(modifier = Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Icon(painter = painterResource(R.drawable.ic_plug), null, tint = color, modifier = Modifier.size(28.dp))
                 Column {
                     Text("Charging", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     Text(
@@ -428,23 +611,17 @@ class OverlayActivity : ComponentActivity() {
     @Composable
     fun NotChargingCard(battery: Int, threshold: Int, color: Color) {
         Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1A0808))
         ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Icon(painter = painterResource(R.drawable.ic_lock), null,
-                    tint = color, modifier = Modifier.size(24.dp))
+            Column(modifier = Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Icon(painter = painterResource(R.drawable.ic_lock), null, tint = color, modifier = Modifier.size(24.dp))
                 Text("Charge to $threshold% to unlock",
                     fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                     color = Color.White, textAlign = TextAlign.Center)
                 Text("${threshold - battery}% needed — plug in your charger",
-                    fontSize = 12.sp, color = Color.White.copy(alpha = 0.5f),
-                    textAlign = TextAlign.Center)
+                    fontSize = 12.sp, color = Color.White.copy(alpha = 0.5f), textAlign = TextAlign.Center)
             }
         }
     }
@@ -458,24 +635,16 @@ class OverlayActivity : ComponentActivity() {
             label = "warn_alpha"
         )
         Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, Color(0xFFFFAB00).copy(alpha = alpha), RoundedCornerShape(12.dp)),
-            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth().border(1.dp, Color(0xFFFFAB00).copy(alpha = alpha), RoundedCornerShape(12.dp)),
+            shape  = RoundedCornerShape(12.dp),
             colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1200))
         ) {
-            Row(
-                modifier = Modifier.padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
+            Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Icon(painter = painterResource(R.drawable.ic_warning), null,
                     tint = Color(0xFFFFAB00), modifier = Modifier.size(22.dp))
-                Text(
-                    "Battery at $battery% — device will lock below $threshold%. Charge now.",
-                    fontSize = 13.sp, color = Color(0xFFFFAB00),
-                    fontWeight = FontWeight.Medium
-                )
+                Text("Battery at $battery% — device will lock below $threshold%. Charge now.",
+                    fontSize = 13.sp, color = Color(0xFFFFAB00), fontWeight = FontWeight.Medium)
             }
         }
     }
@@ -483,16 +652,12 @@ class OverlayActivity : ComponentActivity() {
     @Composable
     fun LinearProgressBar(progress: Float, color: Color) {
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(7.dp)
+            modifier = Modifier.fillMaxWidth().height(7.dp)
                 .clip(RoundedCornerShape(50))
                 .background(Color.White.copy(alpha = 0.08f))
         ) {
             Box(
-                modifier = Modifier
-                    .fillMaxWidth(progress)
-                    .fillMaxHeight()
+                modifier = Modifier.fillMaxWidth(progress).fillMaxHeight()
                     .clip(RoundedCornerShape(50))
                     .background(Brush.horizontalGradient(listOf(color.copy(alpha = 0.6f), color)))
             )
