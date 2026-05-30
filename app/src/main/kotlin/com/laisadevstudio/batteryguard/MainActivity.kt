@@ -17,18 +17,18 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationRail
-import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
@@ -41,7 +41,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,7 +66,6 @@ import com.laisadevstudio.batteryguard.ui.theme.DeepNight
 import com.laisadevstudio.batteryguard.ui.theme.IceBlue
 import com.laisadevstudio.batteryguard.ui.theme.SuccessMint
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 private enum class HomeTab(val title: String, val icon: Int) {
     DASHBOARD("Dashboard", R.drawable.ic_shield_lock),
@@ -91,6 +89,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         dpm = getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
         adminComponent = ComponentName(this, DeviceAdminReceiver::class.java)
+        window.statusBarColor = android.graphics.Color.parseColor("#0B1A29")
+        window.navigationBarColor = android.graphics.Color.parseColor("#0B1A29")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+            window.isStatusBarContrastEnforced = false
+        }
 
         try {
             startForegroundService(Intent(this, BatteryGuardService::class.java))
@@ -254,10 +258,9 @@ class MainActivity : ComponentActivity() {
             GuardRules.emergencyPassState(this@MainActivity, battery.intValue, activeReasons.value.toSet())
         }
         val currentSessionId = AppPrefs.getCurrentLockSessionId(this)
-        val pagerState = rememberPagerState(pageCount = { HomeTab.entries.size })
-        val scope = rememberCoroutineScope()
+        var selectedScreen by remember { mutableStateOf(HomeTab.DASHBOARD) }
 
-        BoxWithConstraints(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
@@ -271,225 +274,106 @@ class MainActivity : ComponentActivity() {
                     )
                 )
         ) {
-            val wideLayout = maxWidth >= 760.dp
-            if (wideLayout) {
-                Row(modifier = Modifier.fillMaxSize()) {
-                    GlassRail(
-                        selectedIndex = pagerState.currentPage,
-                        onSelect = { index -> scope.launch { pagerState.animateScrollToPage(index) } }
-                    )
-                    HorizontalPager(
-                        state = pagerState,
-                        modifier = Modifier
-                            .fillMaxHeight()
-                            .weight(1f)
-                    ) { page ->
-                        MainPage(
-                            tab = HomeTab.entries[page],
-                            battery = battery.intValue,
-                            charging = charging.value,
-                            protectionEnabled = protectionEnabled.value,
-                            protectionStrength = protectionStrength,
-                            usageToday = usageToday.intValue,
-                            usageLimit = dailyLimit.intValue,
-                            dailyLimitEnabled = dailyLimitEnabled.value,
-                            activeReasons = activeReasons.value,
-                            bypassRemainingMs = bypassRemaining.longValue,
-                            networkLabel = network.value.label,
-                            isAdmin = isAdmin,
-                            hasOverlay = hasOverlay,
-                            hasA11y = hasA11y,
-                            hasNotifPerm = hasNotifPerm,
-                            ignoresBatteryOpt = ignoresBatteryOpt,
-                            isDeviceOwner = isDeviceOwner,
-                            isDefaultHome = isDefaultHome,
-                            batteryEnabled = batteryEnabled.value,
-                            scheduleEnabled = scheduleEnabled.value,
-                            threshold = threshold.intValue,
-                            warnMargin = warnMargin.intValue,
-                            window1 = window1.value,
-                            window2 = window2.value,
-                            bedtime = bedtime.value,
-                            dangerousSettingsLocked = dangerousSettingsLocked,
-                            batterySettingsLocked = batterySettingsLocked,
-                            emergencyState = emergencyState,
-                            currentSessionId = currentSessionId,
-                            onPreview = { launchPreviewOverlay() },
-                            onResetUsage = {
-                                AppPrefs.resetUsageToday(this@MainActivity)
-                                usageToday.intValue = 0
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onAdmin = { openDeviceAdminSettings() },
-                            onOverlay = { openOverlaySettings() },
-                            onA11y = { openAccessibilitySettings() },
-                            onNotif = { openNotificationPermission() },
-                            onBatteryOpt = { openBatteryOptimizationSettings() },
-                            onProtectionEnabled = {
-                                protectionEnabled.value = it
-                                AppPrefs.setProtectionEnabled(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onBatteryEnabled = {
-                                batteryEnabled.value = it
-                                AppPrefs.setBatteryProtectionEnabled(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onScheduleEnabled = {
-                                scheduleEnabled.value = it
-                                AppPrefs.setScheduleProtectionEnabled(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onDailyLimitEnabled = {
-                                dailyLimitEnabled.value = it
-                                AppPrefs.setDailyUsageLimitEnabled(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onThresholdChanged = {
-                                threshold.intValue = it
-                                AppPrefs.setThreshold(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onWarnMarginChanged = {
-                                warnMargin.intValue = it
-                                AppPrefs.setWarnMargin(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onDailyLimitChanged = {
-                                dailyLimit.intValue = it
-                                AppPrefs.setDailyUsageLimitMinutes(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onWindow1Changed = {
-                                window1.value = it
-                                AppPrefs.setWindow1(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onWindow2Changed = {
-                                window2.value = it
-                                AppPrefs.setWindow2(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onBedtimeChanged = {
-                                bedtime.value = it
-                                AppPrefs.setBedtimeWindow(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onPickTime = { initial, callback -> pickTime(initial, callback) }
-                        )
-                    }
-                }
-            } else {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    PhoneHeader(
-                        battery = battery.intValue,
-                        charging = charging.value,
-                        activeReasons = activeReasons.value,
-                        bypassRemainingMs = bypassRemaining.longValue
-                    )
-                    TabStrip(
-                        selectedIndex = pagerState.currentPage,
-                        onSelect = { index -> scope.launch { pagerState.animateScrollToPage(index) } }
-                    )
-                    HorizontalPager(
-                        state = pagerState,
-                        modifier = Modifier.weight(1f)
-                    ) { page ->
-                        MainPage(
-                            tab = HomeTab.entries[page],
-                            battery = battery.intValue,
-                            charging = charging.value,
-                            protectionEnabled = protectionEnabled.value,
-                            protectionStrength = protectionStrength,
-                            usageToday = usageToday.intValue,
-                            usageLimit = dailyLimit.intValue,
-                            dailyLimitEnabled = dailyLimitEnabled.value,
-                            activeReasons = activeReasons.value,
-                            bypassRemainingMs = bypassRemaining.longValue,
-                            networkLabel = network.value.label,
-                            isAdmin = isAdmin,
-                            hasOverlay = hasOverlay,
-                            hasA11y = hasA11y,
-                            hasNotifPerm = hasNotifPerm,
-                            ignoresBatteryOpt = ignoresBatteryOpt,
-                            isDeviceOwner = isDeviceOwner,
-                            isDefaultHome = isDefaultHome,
-                            batteryEnabled = batteryEnabled.value,
-                            scheduleEnabled = scheduleEnabled.value,
-                            threshold = threshold.intValue,
-                            warnMargin = warnMargin.intValue,
-                            window1 = window1.value,
-                            window2 = window2.value,
-                            bedtime = bedtime.value,
-                            dangerousSettingsLocked = dangerousSettingsLocked,
-                            batterySettingsLocked = batterySettingsLocked,
-                            emergencyState = emergencyState,
-                            currentSessionId = currentSessionId,
-                            onPreview = { launchPreviewOverlay() },
-                            onResetUsage = {
-                                AppPrefs.resetUsageToday(this@MainActivity)
-                                usageToday.intValue = 0
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onAdmin = { openDeviceAdminSettings() },
-                            onOverlay = { openOverlaySettings() },
-                            onA11y = { openAccessibilitySettings() },
-                            onNotif = { openNotificationPermission() },
-                            onBatteryOpt = { openBatteryOptimizationSettings() },
-                            onProtectionEnabled = {
-                                protectionEnabled.value = it
-                                AppPrefs.setProtectionEnabled(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onBatteryEnabled = {
-                                batteryEnabled.value = it
-                                AppPrefs.setBatteryProtectionEnabled(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onScheduleEnabled = {
-                                scheduleEnabled.value = it
-                                AppPrefs.setScheduleProtectionEnabled(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onDailyLimitEnabled = {
-                                dailyLimitEnabled.value = it
-                                AppPrefs.setDailyUsageLimitEnabled(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onThresholdChanged = {
-                                threshold.intValue = it
-                                AppPrefs.setThreshold(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onWarnMarginChanged = {
-                                warnMargin.intValue = it
-                                AppPrefs.setWarnMargin(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onDailyLimitChanged = {
-                                dailyLimit.intValue = it
-                                AppPrefs.setDailyUsageLimitMinutes(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onWindow1Changed = {
-                                window1.value = it
-                                AppPrefs.setWindow1(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onWindow2Changed = {
-                                window2.value = it
-                                AppPrefs.setWindow2(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onBedtimeChanged = {
-                                bedtime.value = it
-                                AppPrefs.setBedtimeWindow(this@MainActivity, it)
-                                BatteryGuardService.requestRefresh(this@MainActivity)
-                            },
-                            onPickTime = { initial, callback -> pickTime(initial, callback) }
-                        )
-                    }
-                }
+            Column(modifier = Modifier.fillMaxSize()) {
+                AppMenuBar(
+                    selectedScreen = selectedScreen,
+                    battery = battery.intValue,
+                    charging = charging.value,
+                    onSelect = { selectedScreen = it }
+                )
+                MainPage(
+                    tab = selectedScreen,
+                    battery = battery.intValue,
+                    charging = charging.value,
+                    protectionEnabled = protectionEnabled.value,
+                    protectionStrength = protectionStrength,
+                    usageToday = usageToday.intValue,
+                    usageLimit = dailyLimit.intValue,
+                    dailyLimitEnabled = dailyLimitEnabled.value,
+                    activeReasons = activeReasons.value,
+                    bypassRemainingMs = bypassRemaining.longValue,
+                    networkLabel = network.value.label,
+                    isAdmin = isAdmin,
+                    hasOverlay = hasOverlay,
+                    hasA11y = hasA11y,
+                    hasNotifPerm = hasNotifPerm,
+                    ignoresBatteryOpt = ignoresBatteryOpt,
+                    isDeviceOwner = isDeviceOwner,
+                    isDefaultHome = isDefaultHome,
+                    batteryEnabled = batteryEnabled.value,
+                    scheduleEnabled = scheduleEnabled.value,
+                    threshold = threshold.intValue,
+                    warnMargin = warnMargin.intValue,
+                    window1 = window1.value,
+                    window2 = window2.value,
+                    bedtime = bedtime.value,
+                    dangerousSettingsLocked = dangerousSettingsLocked,
+                    batterySettingsLocked = batterySettingsLocked,
+                    emergencyState = emergencyState,
+                    currentSessionId = currentSessionId,
+                    onPreview = { launchPreviewOverlay() },
+                    onResetUsage = {
+                        AppPrefs.resetUsageToday(this@MainActivity)
+                        usageToday.intValue = 0
+                        BatteryGuardService.requestRefresh(this@MainActivity)
+                    },
+                    onAdmin = { openDeviceAdminSettings() },
+                    onOverlay = { openOverlaySettings() },
+                    onA11y = { openAccessibilitySettings() },
+                    onNotif = { openNotificationPermission() },
+                    onBatteryOpt = { openBatteryOptimizationSettings() },
+                    onProtectionEnabled = {
+                        protectionEnabled.value = it
+                        AppPrefs.setProtectionEnabled(this@MainActivity, it)
+                        BatteryGuardService.requestRefresh(this@MainActivity)
+                    },
+                    onBatteryEnabled = {
+                        batteryEnabled.value = it
+                        AppPrefs.setBatteryProtectionEnabled(this@MainActivity, it)
+                        BatteryGuardService.requestRefresh(this@MainActivity)
+                    },
+                    onScheduleEnabled = {
+                        scheduleEnabled.value = it
+                        AppPrefs.setScheduleProtectionEnabled(this@MainActivity, it)
+                        BatteryGuardService.requestRefresh(this@MainActivity)
+                    },
+                    onDailyLimitEnabled = {
+                        dailyLimitEnabled.value = it
+                        AppPrefs.setDailyUsageLimitEnabled(this@MainActivity, it)
+                        BatteryGuardService.requestRefresh(this@MainActivity)
+                    },
+                    onThresholdChanged = {
+                        threshold.intValue = it
+                        AppPrefs.setThreshold(this@MainActivity, it)
+                        BatteryGuardService.requestRefresh(this@MainActivity)
+                    },
+                    onWarnMarginChanged = {
+                        warnMargin.intValue = it
+                        AppPrefs.setWarnMargin(this@MainActivity, it)
+                        BatteryGuardService.requestRefresh(this@MainActivity)
+                    },
+                    onDailyLimitChanged = {
+                        dailyLimit.intValue = it
+                        AppPrefs.setDailyUsageLimitMinutes(this@MainActivity, it)
+                        BatteryGuardService.requestRefresh(this@MainActivity)
+                    },
+                    onWindow1Changed = {
+                        window1.value = it
+                        AppPrefs.setWindow1(this@MainActivity, it)
+                        BatteryGuardService.requestRefresh(this@MainActivity)
+                    },
+                    onWindow2Changed = {
+                        window2.value = it
+                        AppPrefs.setWindow2(this@MainActivity, it)
+                        BatteryGuardService.requestRefresh(this@MainActivity)
+                    },
+                    onBedtimeChanged = {
+                        bedtime.value = it
+                        AppPrefs.setBedtimeWindow(this@MainActivity, it)
+                        BatteryGuardService.requestRefresh(this@MainActivity)
+                    },
+                    onPickTime = { initial, callback -> pickTime(initial, callback) }
+                )
             }
         }
     }
@@ -660,91 +544,57 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun PhoneHeader(
+    private fun AppMenuBar(
+        selectedScreen: HomeTab,
         battery: Int,
         charging: Boolean,
-        activeReasons: List<GuardReason>,
-        bypassRemainingMs: Long
+        onSelect: (HomeTab) -> Unit
     ) {
+        var expanded by remember { mutableStateOf(false) }
         GlassCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp, vertical = 16.dp),
-            accent = if (activeReasons.isEmpty()) IceBlue else AlertOrange,
+            accent = IceBlue,
             stronger = true
         ) {
-            Text("BatteryGuard", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Swipe pages instead of scrolling one giant dashboard.",
-                color = Color.White.copy(alpha = 0.62f),
-                fontSize = 13.sp
-            )
-            Spacer(Modifier.height(12.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                MetricBubble("Battery", "$battery%${if (charging) " • charging" else ""}", Modifier.weight(1f), if (charging) SuccessMint else IceBlue)
-                MetricBubble(
-                    "Lock reasons",
-                    if (activeReasons.isEmpty()) "None" else activeReasons.joinToString(" • ") { GuardRules.reasonShort(it) },
-                    Modifier.weight(1f),
-                    AlertOrange
-                )
-            }
-            if (bypassRemainingMs > 0L) {
-                Spacer(Modifier.height(10.dp))
-                GlassPill("Emergency pass • ${DeviceTools.formatDurationCompact(bypassRemainingMs)} left", accent = SuccessMint)
-            }
-        }
-    }
-
-    @Composable
-    private fun TabStrip(selectedIndex: Int, onSelect: (Int) -> Unit) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            HomeTab.entries.forEachIndexed { index, tab ->
-                GlassPill(
-                    text = tab.title,
-                    accent = if (selectedIndex == index) IceBlue else Color.White,
-                    active = selectedIndex == index,
-                    onClick = { onSelect(index) }
-                )
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-    }
-
-    @Composable
-    private fun GlassRail(selectedIndex: Int, onSelect: (Int) -> Unit) {
-        NavigationRail(
-            modifier = Modifier
-                .padding(start = 12.dp, top = 24.dp, bottom = 24.dp)
-                .widthIn(min = 96.dp),
-            containerColor = Color.Transparent
-        ) {
-            HomeTab.entries.forEachIndexed { index, tab ->
-                NavigationRailItem(
-                    selected = selectedIndex == index,
-                    onClick = { onSelect(index) },
-                    icon = {
-                        Icon(
-                            painter = painterResource(tab.icon),
-                            contentDescription = tab.title,
-                            tint = if (selectedIndex == index) IceBlue else Color.White.copy(alpha = 0.64f)
-                        )
-                    },
-                    label = {
-                        Text(
-                            tab.title,
-                            color = if (selectedIndex == index) Color.White else Color.White.copy(alpha = 0.58f),
-                            fontSize = 11.sp
-                        )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text("BatteryGuard", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "${selectedScreen.title} screen • battery $battery%${if (charging) " • charging" else ""}",
+                        color = Color.White.copy(alpha = 0.62f),
+                        fontSize = 13.sp
+                    )
+                }
+                Box {
+                    IconButton(onClick = { expanded = true }) {
+                        Icon(Icons.Rounded.Menu, contentDescription = "Open menu", tint = Color.White)
                     }
-                )
+                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        HomeTab.entries.forEach { screen ->
+                            DropdownMenuItem(
+                                text = { Text(screen.title) },
+                                onClick = {
+                                    expanded = false
+                                    onSelect(screen)
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        painter = painterResource(screen.icon),
+                                        contentDescription = screen.title,
+                                        tint = if (screen == selectedScreen) IceBlue else Color.Unspecified
+                                    )
+                                }
+                            )
+                        }
+                    }
+                }
             }
         }
     }

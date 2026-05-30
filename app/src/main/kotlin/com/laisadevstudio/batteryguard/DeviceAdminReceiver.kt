@@ -15,9 +15,10 @@ class DeviceAdminReceiver : android.app.admin.DeviceAdminReceiver() {
             val admin = ComponentName(context, DeviceAdminReceiver::class.java)
             if (dpm.isDeviceOwnerApp(context.packageName)) {
                 dpm.setLockTaskPackages(admin, arrayOf(context.packageName))
+                dpm.setLockTaskFeatures(admin, DevicePolicyManager.LOCK_TASK_FEATURE_NONE)
             }
         } catch (e: Exception) {
-            Log.w("DeviceAdmin", "Lock task packages not set: ${e.message}")
+            Log.w("DeviceAdmin", "Lock task policy not set: ${e.message}")
         }
     }
 

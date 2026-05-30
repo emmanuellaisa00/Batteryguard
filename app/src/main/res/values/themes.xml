@@ -1,18 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.BatteryGuard" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <item name="android:windowBackground">#04040F</item>
-        <item name="android:statusBarColor">#04040F</item>
-        <item name="android:navigationBarColor">#04040F</item>
+        <item name="android:windowBackground">#091A28</item>
+        <item name="android:statusBarColor">#0B1A29</item>
+        <item name="android:navigationBarColor">#0B1A29</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowFullscreen">true</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
     <style name="Theme.BatteryGuard.Overlay" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <item name="android:windowBackground">#04040F</item>
+        <item name="android:windowBackground">#0C1E2B</item>
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowTranslucentStatus">false</item>
-        <item name="android:statusBarColor">#04040F</item>
-        <item name="android:navigationBarColor">#04040F</item>
+        <item name="android:statusBarColor">#0C1E2B</item>
+        <item name="android:navigationBarColor">#0C1E2B</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>
