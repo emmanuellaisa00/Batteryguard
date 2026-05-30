@@ -16,7 +16,7 @@ import android.os.Looper
 import android.view.KeyEvent
 import android.view.WindowManager
 import android.widget.Toast
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
@@ -59,7 +59,7 @@ import com.laisadevstudio.batteryguard.ui.theme.IceBlue
 import com.laisadevstudio.batteryguard.ui.theme.SuccessMint
 import kotlinx.coroutines.delay
 
-class OverlayActivity : ComponentActivity() {
+class OverlayActivity : FragmentActivity() {
 
     companion object {
         const val EXTRA_PREVIEW = "preview"

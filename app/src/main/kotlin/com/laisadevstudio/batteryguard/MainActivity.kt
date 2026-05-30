@@ -566,10 +566,10 @@ class MainActivity : ComponentActivity() {
                     ignoresBatteryOpt = ignoresBatteryOpt,
                     guardActive = BatteryGuardService.isGuardActive,
                     activeReasons = activeReasons.value,
-                    lockCount = AppPrefs.getLockCount(this),
-                    lastLock = AppPrefs.getLastLockAt(this),
-                    lastUnlock = AppPrefs.getLastUnlockAt(this),
-                    lastReason = AppPrefs.getLastLockReasons(this)
+                    lockCount = AppPrefs.getLockCount(this@MainActivity),
+                    lastLock = AppPrefs.getLastLockAt(this@MainActivity),
+                    lastUnlock = AppPrefs.getLastUnlockAt(this@MainActivity),
+                    lastReason = AppPrefs.getLastLockReasons(this@MainActivity)
                 )
 
                 Spacer(Modifier.height(28.dp))
