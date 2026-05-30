@@ -37,20 +37,54 @@ object AppPrefs {
     private const val KEY_TODAY_USAGE_DAY = "today_usage_day"
 
     private const val KEY_EMERGENCY_BYPASS_UNTIL = "emergency_bypass_until"
+    private const val KEY_EMERGENCY_DAY = "emergency_day"
+    private const val KEY_EMERGENCY_COUNT = "emergency_count"
+    private const val KEY_EMERGENCY_LAST_SESSION = "emergency_last_session"
+
     private const val KEY_LOCK_COUNT = "lock_count"
     private const val KEY_LAST_LOCK_AT = "last_lock_at"
     private const val KEY_LAST_UNLOCK_AT = "last_unlock_at"
     private const val KEY_LAST_LOCK_REASONS = "last_lock_reasons"
+
+    private const val KEY_CURRENT_LOCK_SESSION_ID = "current_lock_session_id"
     private const val KEY_BATTERY_LOCK_LATCHED = "battery_lock_latched"
+    private const val KEY_BATTERY_THRESHOLD_AT_LOCK = "battery_threshold_at_lock"
+    private const val KEY_BATTERY_UNLOCK_FLOOR_AT_LOCK = "battery_unlock_floor_at_lock"
 
     private const val DEFAULT_THRESHOLD = 20
     private const val DEFAULT_WARN_MARGIN = 10
     private const val DEFAULT_DAILY_LIMIT_MINUTES = 120
+    private const val MAX_EMERGENCY_PASSES_PER_DAY = 2
+    const val EMERGENCY_PASS_DURATION_MS = 2 * 60 * 1000L
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
 
     private fun edit(context: Context) = prefs(context).edit()
+
+    private fun todayKey(): String = LocalDate.now().toString()
+
+    private fun ensureUsageBucket(context: Context) {
+        val p = prefs(context)
+        val today = todayKey()
+        if (p.getString(KEY_TODAY_USAGE_DAY, null) != today) {
+            edit(context)
+                .putString(KEY_TODAY_USAGE_DAY, today)
+                .putLong(KEY_TODAY_USAGE_MS, 0L)
+                .apply()
+        }
+    }
+
+    private fun ensureEmergencyBucket(context: Context) {
+        val p = prefs(context)
+        val today = todayKey()
+        if (p.getString(KEY_EMERGENCY_DAY, null) != today) {
+            edit(context)
+                .putString(KEY_EMERGENCY_DAY, today)
+                .putInt(KEY_EMERGENCY_COUNT, 0)
+                .apply()
+        }
+    }
 
     // ── Protection switches ───────────────────────────────────────────────────
     fun isProtectionEnabled(context: Context): Boolean =
@@ -99,9 +133,30 @@ object AppPrefs {
     fun isBatteryLockLatched(context: Context): Boolean =
         prefs(context).getBoolean(KEY_BATTERY_LOCK_LATCHED, false)
 
-    fun setBatteryLockLatched(context: Context, latched: Boolean) {
-        edit(context).putBoolean(KEY_BATTERY_LOCK_LATCHED, latched).apply()
+    fun beginBatteryLockSession(context: Context, thresholdAtLock: Int, unlockFloor: Int) {
+        edit(context)
+            .putBoolean(KEY_BATTERY_LOCK_LATCHED, true)
+            .putInt(KEY_BATTERY_THRESHOLD_AT_LOCK, thresholdAtLock)
+            .putInt(KEY_BATTERY_UNLOCK_FLOOR_AT_LOCK, unlockFloor)
+            .apply()
     }
+
+    fun clearBatteryLockSession(context: Context) {
+        edit(context)
+            .putBoolean(KEY_BATTERY_LOCK_LATCHED, false)
+            .remove(KEY_BATTERY_THRESHOLD_AT_LOCK)
+            .remove(KEY_BATTERY_UNLOCK_FLOOR_AT_LOCK)
+            .apply()
+    }
+
+    fun getBatteryThresholdAtLock(context: Context): Int =
+        prefs(context).getInt(KEY_BATTERY_THRESHOLD_AT_LOCK, 0)
+
+    fun getBatteryUnlockFloorAtLock(context: Context): Int =
+        prefs(context).getInt(KEY_BATTERY_UNLOCK_FLOOR_AT_LOCK, 0)
+
+    fun isBatterySettingsLocked(context: Context): Boolean =
+        isBatteryLockLatched(context)
 
     // ── Allowed windows ───────────────────────────────────────────────────────
     fun getWindow1(context: Context): TimeWindow = TimeWindow(
@@ -137,9 +192,6 @@ object AppPrefs {
         getWindow2(context)
     )
 
-    fun hasAllowedWindows(context: Context): Boolean =
-        getAllowedWindows(context).any { it.enabled }
-
     // ── Bedtime / focus lock ──────────────────────────────────────────────────
     fun getBedtimeWindow(context: Context): TimeWindow = TimeWindow(
         enabled = prefs(context).getBoolean(KEY_BEDTIME_ENABLED, false),
@@ -163,17 +215,6 @@ object AppPrefs {
         edit(context).putInt(KEY_DAILY_LIMIT_MINUTES, minutes.coerceIn(15, 720)).apply()
     }
 
-    private fun ensureUsageBucket(context: Context) {
-        val p = prefs(context)
-        val today = LocalDate.now().toString()
-        if (p.getString(KEY_TODAY_USAGE_DAY, null) != today) {
-            edit(context)
-                .putString(KEY_TODAY_USAGE_DAY, today)
-                .putLong(KEY_TODAY_USAGE_MS, 0L)
-                .apply()
-        }
-    }
-
     fun addUsageMs(context: Context, deltaMs: Long) {
         if (deltaMs <= 0L) return
         ensureUsageBucket(context)
@@ -194,10 +235,50 @@ object AppPrefs {
         edit(context).putLong(KEY_TODAY_USAGE_MS, 0L).apply()
     }
 
+    // ── Lock sessions ──────────────────────────────────────────────────────────
+    fun getCurrentLockSessionId(context: Context): Long =
+        prefs(context).getLong(KEY_CURRENT_LOCK_SESSION_ID, 0L)
+
+    fun beginLockSession(context: Context): Long {
+        val id = System.currentTimeMillis()
+        edit(context).putLong(KEY_CURRENT_LOCK_SESSION_ID, id).apply()
+        return id
+    }
+
+    fun clearLockSession(context: Context) {
+        edit(context).putLong(KEY_CURRENT_LOCK_SESSION_ID, 0L).apply()
+    }
+
     // ── Emergency bypass ──────────────────────────────────────────────────────
-    fun startEmergencyBypass(context: Context, durationMs: Long = 2 * 60 * 1000L) {
+    fun getEmergencyPassDailyLimit(): Int = MAX_EMERGENCY_PASSES_PER_DAY
+
+    fun getEmergencyPassesUsedToday(context: Context): Int {
+        ensureEmergencyBucket(context)
+        return prefs(context).getInt(KEY_EMERGENCY_COUNT, 0)
+    }
+
+    fun getEmergencyPassesRemainingToday(context: Context): Int =
+        (MAX_EMERGENCY_PASSES_PER_DAY - getEmergencyPassesUsedToday(context)).coerceAtLeast(0)
+
+    fun getLastEmergencySessionId(context: Context): Long =
+        prefs(context).getLong(KEY_EMERGENCY_LAST_SESSION, 0L)
+
+    fun hasEmergencyPassBeenUsedForCurrentSession(context: Context): Boolean {
+        val currentSession = getCurrentLockSessionId(context)
+        return currentSession != 0L && getLastEmergencySessionId(context) == currentSession
+    }
+
+    fun startEmergencyBypass(
+        context: Context,
+        sessionId: Long,
+        durationMs: Long = EMERGENCY_PASS_DURATION_MS
+    ) {
+        ensureEmergencyBucket(context)
+        val used = getEmergencyPassesUsedToday(context)
         edit(context)
             .putLong(KEY_EMERGENCY_BYPASS_UNTIL, System.currentTimeMillis() + durationMs)
+            .putInt(KEY_EMERGENCY_COUNT, used + 1)
+            .putLong(KEY_EMERGENCY_LAST_SESSION, sessionId)
             .apply()
     }
 

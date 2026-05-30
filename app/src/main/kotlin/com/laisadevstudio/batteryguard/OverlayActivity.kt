@@ -16,10 +16,17 @@ import android.os.Looper
 import android.view.KeyEvent
 import android.view.WindowManager
 import android.widget.Toast
-import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -31,13 +38,22 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -45,6 +61,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import com.laisadevstudio.batteryguard.ui.GlassCard
 import com.laisadevstudio.batteryguard.ui.GlassPill
 import com.laisadevstudio.batteryguard.ui.GlassSectionTitle
@@ -58,6 +75,9 @@ import com.laisadevstudio.batteryguard.ui.theme.DeepNight
 import com.laisadevstudio.batteryguard.ui.theme.IceBlue
 import com.laisadevstudio.batteryguard.ui.theme.SuccessMint
 import kotlinx.coroutines.delay
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 class OverlayActivity : FragmentActivity() {
 
@@ -145,7 +165,8 @@ class OverlayActivity : FragmentActivity() {
         if (!previewMode) {
             try {
                 startForegroundService(Intent(this, OverlayWindowService::class.java))
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            }
         }
 
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -173,7 +194,8 @@ class OverlayActivity : FragmentActivity() {
         if (!previewMode && BatteryGuardService.isGuardActive && !OverlayWindowService.isRunning) {
             try {
                 startForegroundService(Intent(this, OverlayWindowService::class.java))
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            }
         }
         if (!previewMode) scheduleSleep()
     }
@@ -214,7 +236,9 @@ class OverlayActivity : FragmentActivity() {
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     super.onAuthenticationSucceeded(result)
-                    AppPrefs.startEmergencyBypass(this@OverlayActivity)
+                    val sessionId = AppPrefs.getCurrentLockSessionId(this@OverlayActivity)
+                        .takeIf { it != 0L } ?: System.currentTimeMillis()
+                    AppPrefs.startEmergencyBypass(this@OverlayActivity, sessionId)
                     BatteryGuardService.requestRefresh(this@OverlayActivity)
                     showToast("Emergency pass granted for 2 minutes")
                     releaseKiosk()
@@ -223,7 +247,8 @@ class OverlayActivity : FragmentActivity() {
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     super.onAuthenticationError(errorCode, errString)
                     if (errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON &&
-                        errorCode != BiometricPrompt.ERROR_USER_CANCELED) {
+                        errorCode != BiometricPrompt.ERROR_USER_CANCELED &&
+                        errorCode != BiometricPrompt.ERROR_CANCELED) {
                         showToast(errString.toString())
                     }
                 }
@@ -231,8 +256,8 @@ class OverlayActivity : FragmentActivity() {
         )
 
         promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Emergency bypass")
-            .setSubtitle("Unlock for 2 minutes, then BatteryGuard checks all rules again")
+            .setTitle("Emergency pass")
+            .setSubtitle("Unlock for 2 minutes. BatteryGuard will re-check all rules when it ends.")
             .setConfirmationRequired(false)
             .apply {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -244,17 +269,21 @@ class OverlayActivity : FragmentActivity() {
             .build()
     }
 
-    private fun startEmergencyBypass() {
+    private fun startEmergencyBypass(reasons: Set<GuardReason>, batteryLevel: Int) {
         if (previewMode) {
             finish()
             return
         }
-        val status = BiometricManager.from(this)
-            .canAuthenticate(emergencyAuthenticators)
+        val state = GuardRules.emergencyPassState(this, batteryLevel, reasons)
+        if (!state.allowed) {
+            showToast(state.title)
+            return
+        }
+        val status = BiometricManager.from(this).canAuthenticate(emergencyAuthenticators)
         if (status == BiometricManager.BIOMETRIC_SUCCESS) {
             biometricPrompt.authenticate(promptInfo)
         } else {
-            showToast("Biometric auth unavailable on this device")
+            showToast("Biometric or device credential unavailable")
         }
     }
 
@@ -263,11 +292,7 @@ class OverlayActivity : FragmentActivity() {
             showToast("Torch unavailable")
             return
         }
-        try {
-            setTorch(!torchEnabled)
-        } catch (e: Exception) {
-            showToast("Torch unavailable: ${e.message?.take(32) ?: "error"}")
-        }
+        setTorch(!torchEnabled)
     }
 
     private fun setTorch(enabled: Boolean) {
@@ -276,7 +301,8 @@ class OverlayActivity : FragmentActivity() {
             val cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
             cameraManager.setTorchMode(cameraId, enabled)
             torchEnabled = enabled
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
     }
 
     private fun showRestrictedToggleMessage(label: String) {
@@ -311,7 +337,8 @@ class OverlayActivity : FragmentActivity() {
         try {
             @Suppress("DEPRECATION")
             dpm.setStatusBarDisabled(adminComponent, disabled)
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
     }
 
     private fun releaseKiosk() {
@@ -332,13 +359,15 @@ class OverlayActivity : FragmentActivity() {
                     try { am.killBackgroundProcesses(pkg) } catch (_: Exception) {}
                 }
             }
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
     }
 
     private fun showToast(msg: String) {
         try {
             Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?) = when (keyCode) {
@@ -361,13 +390,14 @@ class OverlayActivity : FragmentActivity() {
     }
 
     @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {}
+    override fun onBackPressed() {
+    }
 
     @Composable
     private fun OverlayScreen() {
         val previewReasons = remember { listOf(GuardReason.LOW_BATTERY, GuardReason.BEDTIME, GuardReason.DAILY_LIMIT) }
         val battery = remember { mutableIntStateOf(if (previewMode) 12 else BatteryGuardService.currentBatteryLevel) }
-        val charging = remember { mutableStateOf(if (previewMode) false else BatteryGuardService.isCharging) }
+        val charging = remember { mutableStateOf(if (previewMode) true else BatteryGuardService.isCharging) }
         val reasons = remember { mutableStateOf(if (previewMode) previewReasons else BatteryGuardService.activeReasons.toList()) }
         val bypassRemaining = remember { mutableLongStateOf(AppPrefs.getEmergencyBypassRemainingMs(this)) }
         val network = remember { mutableStateOf(DeviceTools.getNetworkSnapshot(this)) }
@@ -400,6 +430,7 @@ class OverlayActivity : FragmentActivity() {
             battery.intValue < batteryTarget -> AlertOrange
             else -> SuccessMint
         }
+        val emergencyState = GuardRules.emergencyPassState(this, battery.intValue, activeReasons.toSet())
 
         Box(
             modifier = Modifier
@@ -417,15 +448,15 @@ class OverlayActivity : FragmentActivity() {
         ) {
             Box(
                 modifier = Modifier
-                    .size(280.dp)
+                    .size(300.dp)
                     .align(Alignment.TopCenter)
-                    .offset(y = 60.dp)
-                    .graphicsLayer(alpha = 0.85f)
-                    .blur(42.dp)
+                    .offset(y = 40.dp)
+                    .graphicsLayer(alpha = 0.9f)
+                    .blur(54.dp)
                     .background(
                         Brush.radialGradient(
                             listOf(
-                                IceBlue.copy(alpha = 0.24f),
+                                IceBlue.copy(alpha = 0.22f),
                                 AuroraBlue.copy(alpha = 0.10f),
                                 Color.Transparent
                             )
@@ -451,7 +482,6 @@ class OverlayActivity : FragmentActivity() {
                     preview = previewMode
                 )
 
-                Spacer(Modifier.height(4.dp))
                 Text(
                     if (previewMode) "LIQUID LOCK PREVIEW" else "DEVICE LOCKED",
                     color = Color.White,
@@ -460,13 +490,14 @@ class OverlayActivity : FragmentActivity() {
                     letterSpacing = 2.sp
                 )
                 Text(
-                    if (previewMode) "Preview mode won't enforce kiosk restrictions." else "BatteryGuard is enforcing your active safety rules.",
+                    if (previewMode) "Preview mode shows the full lock design without enforcing kiosk restrictions."
+                    else "BatteryGuard is enforcing the active rules below. Battery reasons are always the highest priority.",
                     color = Color.White.copy(alpha = 0.62f),
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center
                 )
 
-                BatteryOrb(
+                ChargingBatteryOrb(
                     battery = battery.intValue,
                     charging = charging.value,
                     target = batteryTarget,
@@ -478,31 +509,62 @@ class OverlayActivity : FragmentActivity() {
                     MetricBubble("Network", network.value.label, Modifier.weight(1f), AuroraBlue)
                 }
 
-                if (activeReasons.isNotEmpty()) {
-                    GlassCard(accent = AlertOrange, stronger = true, modifier = Modifier.fillMaxWidth()) {
-                        GlassSectionTitle(
-                            title = "Why you're locked",
-                            subtitle = "BatteryGuard can stack multiple lock reasons. The phone only unlocks when every active reason clears — unless you use the 2-minute emergency pass."
-                        )
-                        Spacer(Modifier.height(12.dp))
+                GlassCard(accent = AlertOrange, stronger = true, modifier = Modifier.fillMaxWidth()) {
+                    GlassSectionTitle(
+                        title = "Why this device is locked",
+                        subtitle = "BatteryGuard stacks reasons, but low battery always wins. Emergency pass does not override battery lock or anything below 10%."
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    if (activeReasons.isEmpty()) {
+                        Text("No active reasons — this is preview mode or the device is between states.", color = Color.White.copy(alpha = 0.64f), fontSize = 13.sp)
+                    } else {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             activeReasons.forEach { GlassPill(GuardRules.reasonShort(it), accent = AlertOrange) }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        activeReasons.forEach { reason ->
+                            Text(
+                                "• ${GuardRules.reasonLabel(reason)} — ${GuardRules.reasonDetail(this@OverlayActivity, reason)}",
+                                color = Color.White.copy(alpha = 0.72f),
+                                fontSize = 13.sp,
+                                lineHeight = 20.sp
+                            )
+                            Spacer(Modifier.height(4.dp))
                         }
                     }
                 }
 
                 GlassCard(accent = IceBlue, stronger = true, modifier = Modifier.fillMaxWidth()) {
                     GlassSectionTitle(
-                        title = "What unlocks this?",
-                        subtitle = "Battery rule is separate from KeepSafe schedule rules. Emergency bypass unlocks for 2 minutes only, then BatteryGuard checks all rules again."
+                        title = "How to unlock",
+                        subtitle = "BatteryGuard shows exact next steps instead of only saying 'locked'."
                     )
                     Spacer(Modifier.height(12.dp))
                     unlockItems.forEach {
                         Text("• $it", color = Color.White.copy(alpha = 0.72f), fontSize = 13.sp, lineHeight = 20.sp)
                         Spacer(Modifier.height(6.dp))
                     }
+                }
+
+                GlassCard(accent = SuccessMint, stronger = true, modifier = Modifier.fillMaxWidth()) {
+                    GlassSectionTitle(
+                        title = "Emergency tools & pass",
+                        subtitle = "Torch is always available. Emergency pass is tightly limited: 2 per day, 1 per session, never below 10%, never during battery lock."
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        MetricBubble("Passes left", emergencyState.remainingToday.toString(), Modifier.weight(1f), if (emergencyState.allowed) SuccessMint else AlertOrange)
+                        MetricBubble("Used today", emergencyState.usedToday.toString(), Modifier.weight(1f), AuroraBlue)
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    GlassPill(
+                        text = emergencyState.title,
+                        accent = if (emergencyState.allowed) SuccessMint else AlertOrange
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Text(emergencyState.detail, color = Color.White.copy(alpha = 0.72f), fontSize = 13.sp, lineHeight = 20.sp)
                     if (bypassRemaining.longValue > 0L) {
-                        Spacer(Modifier.height(8.dp))
+                        Spacer(Modifier.height(10.dp))
                         GlassPill(
                             text = "Emergency pass active • ${DeviceTools.formatDurationCompact(bypassRemaining.longValue)} left",
                             accent = SuccessMint
@@ -545,14 +607,19 @@ class OverlayActivity : FragmentActivity() {
                 }
 
                 FilledTonalButton(
-                    onClick = { startEmergencyBypass() },
+                    onClick = { startEmergencyBypass(activeReasons.toSet(), battery.intValue) },
+                    enabled = previewMode || emergencyState.allowed,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.filledTonalButtonColors(
                         containerColor = if (previewMode) Color.White.copy(alpha = 0.12f) else SuccessMint.copy(alpha = 0.18f),
                         contentColor = Color.White
                     )
                 ) {
-                    Text(if (previewMode) "Exit preview" else "Emergency bypass • 2 minutes")
+                    Text(
+                        if (previewMode) "Exit preview"
+                        else if (emergencyState.allowed) "Emergency pass • 2 minutes"
+                        else "Emergency tools only"
+                    )
                 }
 
                 Spacer(Modifier.height(24.dp))
@@ -595,29 +662,84 @@ class OverlayActivity : FragmentActivity() {
     }
 
     @Composable
-    private fun BatteryOrb(
+    private fun ChargingBatteryOrb(
         battery: Int,
         charging: Boolean,
         target: Int,
         color: Color
     ) {
+        val transition = rememberInfiniteTransition(label = "battery_orb")
+        val pulse by transition.animateFloat(
+            initialValue = 0.88f,
+            targetValue = 1.12f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(1800, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "pulse"
+        )
+        val ringSweep by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(2800, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "sweep"
+        )
+        val shimmer by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(2200, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "shimmer"
+        )
+
         Box(
-            modifier = Modifier
-                .size(240.dp)
-                .clip(CircleShape)
-                .background(
-                    Brush.radialGradient(
-                        listOf(
-                            color.copy(alpha = 0.40f),
-                            color.copy(alpha = 0.18f),
-                            Color.White.copy(alpha = 0.05f),
-                            Color.Transparent
-                        )
-                    )
-                )
-                .padding(20.dp),
+            modifier = Modifier.size(252.dp),
             contentAlignment = Alignment.Center
         ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val centerX = size.width / 2f
+                val centerY = size.height / 2f
+                val baseRadius = size.minDimension * 0.34f
+                drawCircle(color = color.copy(alpha = 0.08f), radius = baseRadius * 1.85f * pulse)
+                drawCircle(color = color.copy(alpha = 0.14f), radius = baseRadius * 1.45f)
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        listOf(color.copy(alpha = 0.34f), color.copy(alpha = 0.08f), Color.Transparent)
+                    ),
+                    radius = baseRadius * 1.2f
+                )
+                drawArc(
+                    brush = Brush.sweepGradient(
+                        listOf(Color.Transparent, color.copy(alpha = 0.2f), Color.White.copy(alpha = 0.8f), color.copy(alpha = 0.2f), Color.Transparent)
+                    ),
+                    startAngle = ringSweep * 360f,
+                    sweepAngle = 240f,
+                    useCenter = false,
+                    topLeft = androidx.compose.ui.geometry.Offset(centerX - baseRadius * 1.42f, centerY - baseRadius * 1.42f),
+                    size = androidx.compose.ui.geometry.Size(baseRadius * 2.84f, baseRadius * 2.84f),
+                    style = Stroke(width = 8.dp.toPx(), cap = StrokeCap.Round)
+                )
+
+                if (charging) {
+                    repeat(4) { index ->
+                        val phase = (shimmer + index * 0.23f) % 1f
+                        val angle = (phase * 2f * PI).toFloat()
+                        val x = centerX + cos(angle + index) * baseRadius * 0.55f
+                        val y = centerY + baseRadius * 0.7f - phase * baseRadius * 1.25f
+                        drawCircle(
+                            color = Color.White.copy(alpha = 0.18f + (1f - phase) * 0.35f),
+                            radius = (4f + index * 1.2f),
+                            center = androidx.compose.ui.geometry.Offset(x, y)
+                        )
+                    }
+                }
+            }
+
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
                     painter = painterResource(if (charging) R.drawable.ic_bolt else R.drawable.ic_shield_lock),
@@ -625,16 +747,16 @@ class OverlayActivity : FragmentActivity() {
                     tint = color,
                     modifier = Modifier.size(32.dp)
                 )
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(8.dp))
                 Text("$battery%", color = Color.White, fontSize = 48.sp, fontWeight = FontWeight.ExtraBold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    if (charging) "charging toward unlock" else "charge needed to release",
+                    if (charging) "charging animation active" else "charge needed to release",
                     color = Color.White.copy(alpha = 0.60f),
                     fontSize = 13.sp
                 )
                 Spacer(Modifier.height(14.dp))
-                Box(modifier = Modifier.fillMaxWidth(0.8f)) {
+                Box(modifier = Modifier.fillMaxWidth(0.78f)) {
                     LiquidProgress(progress = battery / target.toFloat(), accent = color)
                 }
             }

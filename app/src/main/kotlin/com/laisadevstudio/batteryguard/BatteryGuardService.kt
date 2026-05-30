@@ -48,6 +48,7 @@ class BatteryGuardService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var lastUsageTickMs = 0L
     private var warningFired = false
+    private var underlyingReasons: Set<GuardReason> = emptySet()
     private val bypassExpiryRunnable = Runnable {
         evaluateGuardState("bypassExpiry")
     }
@@ -163,43 +164,53 @@ class BatteryGuardService : Service() {
 
     private fun evaluateGuardState(source: String) {
         GuardRules.syncBatteryLatch(this, currentBatteryLevel)
-        val oldReasons = activeReasons
-        val wasActive = isGuardActive
-        activeReasons = GuardRules.evaluate(this, currentBatteryLevel)
+
+        val oldVisibleReasons = activeReasons
+        val oldUnderlyingReasons = underlyingReasons
+        val hadUnderlyingLock = oldUnderlyingReasons.isNotEmpty()
+
+        underlyingReasons = GuardRules.evaluateRaw(this, currentBatteryLevel)
+        val bypassActive = AppPrefs.isEmergencyBypassActive(this)
+        activeReasons = if (bypassActive) emptySet() else underlyingReasons
         isGuardActive = activeReasons.isNotEmpty()
 
-        handleWarningNotification()
+        handleWarningNotification(underlyingReasons)
 
-        if (AppPrefs.isEmergencyBypassActive(this)) scheduleBypassExpiryCheck()
-        else handler.removeCallbacks(bypassExpiryRunnable)
-
-        if (isGuardActive && !wasActive) {
-            AppPrefs.recordLockEvent(this, GuardRules.reasonsCsv(activeReasons))
-        }
-        if (!isGuardActive && wasActive) {
+        if (underlyingReasons.isNotEmpty() && !hadUnderlyingLock) {
+            AppPrefs.beginLockSession(this)
+            AppPrefs.recordLockEvent(this, GuardRules.reasonsCsv(underlyingReasons))
+        } else if (underlyingReasons.isEmpty() && hadUnderlyingLock) {
             AppPrefs.recordUnlockEvent(this)
+            AppPrefs.clearLockSession(this)
+            AppPrefs.clearEmergencyBypass(this)
         }
+
+        if (bypassActive) scheduleBypassExpiryCheck()
+        else handler.removeCallbacks(bypassExpiryRunnable)
 
         if (!isGuardActive) {
             if (OverlayWindowService.isRunning) stopService(Intent(this, OverlayWindowService::class.java))
-        } else if (!wasActive || activeReasons != oldReasons) {
+        } else if (oldVisibleReasons != activeReasons) {
             tryLaunchOverlayIfUnlocked(this)
         }
 
         updateNotification()
-        if (wasActive != isGuardActive || oldReasons != activeReasons) {
-            Log.d(TAG, "[$source] guard=$isGuardActive battery=$currentBatteryLevel reasons=${GuardRules.reasonsCsv(activeReasons)}")
+        if (oldVisibleReasons != activeReasons || oldUnderlyingReasons != underlyingReasons) {
+            Log.d(
+                TAG,
+                "[$source] visible=$isGuardActive battery=$currentBatteryLevel underlying=${GuardRules.reasonsCsv(underlyingReasons)}"
+            )
         }
     }
 
-    private fun handleWarningNotification() {
+    private fun handleWarningNotification(rawReasons: Set<GuardReason>) {
         val threshold = AppPrefs.getThreshold(this)
         val warnLevel = threshold + AppPrefs.getWarnMargin(this)
         val batteryGuardEnabled = AppPrefs.isProtectionEnabled(this) && AppPrefs.isBatteryProtectionEnabled(this)
         val shouldWarn = batteryGuardEnabled &&
             !isCharging &&
             currentBatteryLevel in (threshold + 1)..warnLevel &&
-            GuardReason.LOW_BATTERY !in activeReasons
+            GuardReason.LOW_BATTERY !in rawReasons
 
         when {
             shouldWarn && !warningFired -> {
@@ -211,7 +222,7 @@ class BatteryGuardService : Service() {
                 clearWarningNotification()
             }
         }
-        if (GuardReason.LOW_BATTERY in activeReasons) clearWarningNotification()
+        if (GuardReason.LOW_BATTERY in rawReasons) clearWarningNotification()
     }
 
     private fun scheduleBypassExpiryCheck() {
@@ -279,18 +290,15 @@ class BatteryGuardService : Service() {
         }
 
         val text = when {
-            AppPrefs.isEmergencyBypassActive(this) ->
+            AppPrefs.isEmergencyBypassActive(this) -> {
                 "Unlocked for ${DeviceTools.formatDurationCompact(AppPrefs.getEmergencyBypassRemainingMs(this))}"
-            !AppPrefs.isProtectionEnabled(this) ->
-                "Protection disabled in dashboard"
-            isGuardActive -> {
-                val reasons = GuardRules.reasonsCsv(activeReasons)
+            }
+            !AppPrefs.isProtectionEnabled(this) -> "Protection disabled in dashboard"
+            underlyingReasons.isNotEmpty() -> {
+                val reasons = GuardRules.reasonsCsv(underlyingReasons)
                 val target = GuardRules.batteryUnlockTarget(this)
-                if (GuardReason.LOW_BATTERY in activeReasons) {
-                    "$reasons • charge to $target%+ to release"
-                } else {
-                    reasons
-                }
+                if (GuardReason.LOW_BATTERY in underlyingReasons) "$reasons • charge to $target%+ to release"
+                else reasons
             }
             else -> {
                 val usage = AppPrefs.getTodayUsageMinutes(this)

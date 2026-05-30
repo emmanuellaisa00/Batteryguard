@@ -13,16 +13,34 @@ enum class GuardReason {
     DAILY_LIMIT
 }
 
+enum class EmergencyBlockReason {
+    ACTIVE,
+    BATTERY_CRITICAL,
+    BATTERY_LOCK,
+    DAILY_EXHAUSTED,
+    SESSION_EXHAUSTED
+}
+
+data class EmergencyPassState(
+    val allowed: Boolean,
+    val title: String,
+    val detail: String,
+    val remainingToday: Int,
+    val usedToday: Int,
+    val blockedBy: EmergencyBlockReason? = null
+)
+
 object GuardRules {
 
-    fun evaluate(context: Context, batteryLevel: Int): Set<GuardReason> {
+    fun evaluateRaw(context: Context, batteryLevel: Int): Set<GuardReason> {
         if (!AppPrefs.isProtectionEnabled(context)) return emptySet()
-        if (AppPrefs.isEmergencyBypassActive(context)) return emptySet()
 
         val reasons = linkedSetOf<GuardReason>()
 
         if (AppPrefs.isBatteryProtectionEnabled(context)) {
-            val threshold = AppPrefs.getThreshold(context)
+            val threshold = AppPrefs.getBatteryThresholdAtLock(context)
+                .takeIf { AppPrefs.isBatteryLockLatched(context) && it > 0 }
+                ?: AppPrefs.getThreshold(context)
             val unlockTarget = batteryUnlockTarget(context)
             val lowBatteryActive = if (AppPrefs.isBatteryLockLatched(context)) {
                 batteryLevel < unlockTarget
@@ -53,19 +71,91 @@ object GuardRules {
         return reasons
     }
 
-    fun batteryUnlockTarget(context: Context): Int =
-        max(20, AppPrefs.getThreshold(context))
+    fun evaluate(context: Context, batteryLevel: Int): Set<GuardReason> {
+        val raw = evaluateRaw(context, batteryLevel)
+        return if (AppPrefs.isEmergencyBypassActive(context)) emptySet() else raw
+    }
+
+    fun batteryUnlockTarget(context: Context): Int {
+        val latched = AppPrefs.getBatteryUnlockFloorAtLock(context)
+        return if (AppPrefs.isBatteryLockLatched(context) && latched >= 20) latched
+        else max(20, AppPrefs.getThreshold(context))
+    }
 
     fun syncBatteryLatch(context: Context, batteryLevel: Int) {
         if (!AppPrefs.isProtectionEnabled(context) || !AppPrefs.isBatteryProtectionEnabled(context)) {
-            AppPrefs.setBatteryLockLatched(context, false)
+            AppPrefs.clearBatteryLockSession(context)
             return
         }
-        val threshold = AppPrefs.getThreshold(context)
-        val unlockTarget = batteryUnlockTarget(context)
-        when {
-            batteryLevel < threshold -> AppPrefs.setBatteryLockLatched(context, true)
-            AppPrefs.isBatteryLockLatched(context) && batteryLevel >= unlockTarget -> AppPrefs.setBatteryLockLatched(context, false)
+
+        val currentThreshold = AppPrefs.getThreshold(context)
+        val currentUnlockTarget = max(20, currentThreshold)
+        if (!AppPrefs.isBatteryLockLatched(context) && batteryLevel < currentThreshold) {
+            AppPrefs.beginBatteryLockSession(context, currentThreshold, currentUnlockTarget)
+            return
+        }
+
+        if (AppPrefs.isBatteryLockLatched(context) && batteryLevel >= batteryUnlockTarget(context)) {
+            AppPrefs.clearBatteryLockSession(context)
+        }
+    }
+
+    fun emergencyPassState(
+        context: Context,
+        batteryLevel: Int,
+        reasons: Set<GuardReason>
+    ): EmergencyPassState {
+        val used = AppPrefs.getEmergencyPassesUsedToday(context)
+        val remaining = AppPrefs.getEmergencyPassesRemainingToday(context)
+
+        return when {
+            AppPrefs.isEmergencyBypassActive(context) -> EmergencyPassState(
+                allowed = false,
+                title = "Emergency pass active",
+                detail = "A 2-minute pass is already running. BatteryGuard will re-check all rules when it ends.",
+                remainingToday = remaining,
+                usedToday = used,
+                blockedBy = EmergencyBlockReason.ACTIVE
+            )
+            batteryLevel < 10 -> EmergencyPassState(
+                allowed = false,
+                title = "Emergency pass unavailable below 10%",
+                detail = "Battery is critically low. BatteryGuard only allows emergency tools at this level.",
+                remainingToday = remaining,
+                usedToday = used,
+                blockedBy = EmergencyBlockReason.BATTERY_CRITICAL
+            )
+            GuardReason.LOW_BATTERY in reasons || AppPrefs.isBatteryLockLatched(context) -> EmergencyPassState(
+                allowed = false,
+                title = "Battery lock blocks emergency pass",
+                detail = "Low-battery protection takes priority. Charge first; emergency pass cannot override battery lock.",
+                remainingToday = remaining,
+                usedToday = used,
+                blockedBy = EmergencyBlockReason.BATTERY_LOCK
+            )
+            remaining <= 0 -> EmergencyPassState(
+                allowed = false,
+                title = "Emergency passes exhausted",
+                detail = "You used all ${AppPrefs.getEmergencyPassDailyLimit()} passes for today. The count resets at midnight.",
+                remainingToday = 0,
+                usedToday = used,
+                blockedBy = EmergencyBlockReason.DAILY_EXHAUSTED
+            )
+            AppPrefs.hasEmergencyPassBeenUsedForCurrentSession(context) -> EmergencyPassState(
+                allowed = false,
+                title = "Session pass already used",
+                detail = "Each active lock session only gets one emergency pass. Clear the current lock reasons first.",
+                remainingToday = remaining,
+                usedToday = used,
+                blockedBy = EmergencyBlockReason.SESSION_EXHAUSTED
+            )
+            else -> EmergencyPassState(
+                allowed = true,
+                title = "Emergency pass ready",
+                detail = "Available for non-battery locks only. One pass per lock session, ${AppPrefs.getEmergencyPassDailyLimit()} passes per day.",
+                remainingToday = remaining,
+                usedToday = used
+            )
         }
     }
 
@@ -81,6 +171,14 @@ object GuardRules {
         GuardReason.OUTSIDE_ALLOWED_WINDOW -> "Schedule"
         GuardReason.BEDTIME -> "Bedtime"
         GuardReason.DAILY_LIMIT -> "Daily Limit"
+    }
+
+    fun reasonDetail(context: Context, reason: GuardReason): String = when (reason) {
+        GuardReason.LOW_BATTERY -> "Battery is too low. Charge to ${batteryUnlockTarget(context)}% or higher."
+        GuardReason.OUTSIDE_ALLOWED_WINDOW -> nextAllowedWindowText(context)?.let { "Device use resumes at $it." }
+            ?: "Wait for the next allowed window."
+        GuardReason.BEDTIME -> "Bedtime/focus lock ends at ${formatMinutes(AppPrefs.getBedtimeWindow(context).endMinutes)}."
+        GuardReason.DAILY_LIMIT -> "Today's screen-time budget is exhausted. It resets at midnight."
     }
 
     fun reasonsCsv(reasons: Set<GuardReason>): String =
@@ -109,10 +207,7 @@ object GuardRules {
         val windows = AppPrefs.getAllowedWindows(context).filter { it.enabled }
         if (windows.isEmpty()) return null
         val now = nowMinutesOfDay()
-        val futureStarts = windows
-            .map { it.startMinutes }
-            .sorted()
-
+        val futureStarts = windows.map { it.startMinutes }.sorted()
         val todayNext = futureStarts.firstOrNull { it > now }
         return if (todayNext != null) {
             "${formatMinutes(todayNext)} today"
