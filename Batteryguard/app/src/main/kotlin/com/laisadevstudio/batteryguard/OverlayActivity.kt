@@ -661,8 +661,11 @@ class OverlayActivity : FragmentActivity() {
                     radius = radius * 1.05f
                 )
                 val orbRadius = radius * 0.98f
-                drawCircle(color = Color.White.copy(alpha = 0.06f), radius = orbRadius)
-                val fillTop = size.center.y + orbRadius - (orbRadius * 2f * fillProgress)
+                val centerX = size.width / 2f
+                val centerY = size.height / 2f
+                val orbCenter = androidx.compose.ui.geometry.Offset(centerX, centerY)
+                drawCircle(color = Color.White.copy(alpha = 0.06f), radius = orbRadius, center = orbCenter)
+                val fillTop = centerY + orbRadius - (orbRadius * 2f * fillProgress)
                 drawCircle(
                     brush = Brush.verticalGradient(
                         listOf(
@@ -670,17 +673,17 @@ class OverlayActivity : FragmentActivity() {
                             if (charging) chargingGreen else color
                         ),
                         startY = fillTop,
-                        endY = size.center.y + orbRadius
+                        endY = centerY + orbRadius
                     ),
                     radius = orbRadius,
-                    center = size.center
+                    center = orbCenter
                 )
                 if (charging) {
                     repeat(5) { index ->
                         val phase = (shimmer + index * 0.17f) % 1f
                         val angle = (phase * 2f * PI).toFloat()
-                        val x = size.center.x + cos((angle + index).toDouble()).toFloat() * orbRadius * 0.55f
-                        val y = size.center.y + orbRadius * 0.72f - phase * orbRadius * 1.35f
+                        val x = centerX + cos((angle + index).toDouble()).toFloat() * orbRadius * 0.55f
+                        val y = centerY + orbRadius * 0.72f - phase * orbRadius * 1.35f
                         drawCircle(
                             color = chargingGreen.copy(alpha = 0.15f + (1f - phase) * 0.38f),
                             radius = (3.8f + index * 0.8f),
