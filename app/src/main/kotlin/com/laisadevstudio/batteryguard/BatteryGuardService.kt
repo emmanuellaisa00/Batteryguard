@@ -34,6 +34,7 @@ class BatteryGuardService : Service() {
         @Volatile var isCharging = false
         @Volatile var currentBatteryLevel = 100
         @Volatile var activeReasons: Set<GuardReason> = emptySet()
+        @Volatile var underlyingReasonsLive: Set<GuardReason> = emptySet()
 
         fun requestRefresh(context: Context) {
             try {
@@ -170,6 +171,7 @@ class BatteryGuardService : Service() {
         val hadUnderlyingLock = oldUnderlyingReasons.isNotEmpty()
 
         underlyingReasons = GuardRules.evaluateRaw(this, currentBatteryLevel)
+        underlyingReasonsLive = underlyingReasons
         val bypassActive = AppPrefs.isEmergencyBypassActive(this)
         activeReasons = if (bypassActive) emptySet() else underlyingReasons
         isGuardActive = activeReasons.isNotEmpty()

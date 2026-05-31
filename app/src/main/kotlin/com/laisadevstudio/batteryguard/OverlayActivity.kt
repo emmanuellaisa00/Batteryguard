@@ -19,6 +19,7 @@ import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -37,6 +38,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -61,6 +63,8 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.laisadevstudio.batteryguard.ui.GlassCard
+import com.laisadevstudio.batteryguard.ui.LocalUiAccessibility
+import com.laisadevstudio.batteryguard.ui.UiAccessibilityState
 import com.laisadevstudio.batteryguard.ui.GlassPill
 import com.laisadevstudio.batteryguard.ui.GlassSectionTitle
 import com.laisadevstudio.batteryguard.ui.LiquidProgress
@@ -178,8 +182,15 @@ class OverlayActivity : FragmentActivity() {
         setupBiometricPrompt()
 
         setContent {
+            val reducedTransparency = AppPrefs.isReducedTransparencyEnabled(this@OverlayActivity)
             BatteryGuardTheme {
-                OverlayScreen()
+                CompositionLocalProvider(
+                    LocalUiAccessibility provides UiAccessibilityState(
+                        reduceTransparency = reducedTransparency
+                    )
+                ) {
+                    OverlayScreen()
+                }
             }
         }
 
@@ -525,8 +536,8 @@ class OverlayActivity : FragmentActivity() {
                     LockPanel.entries.forEach { panel ->
                         GlassPill(
                             text = when (panel) {
-                                LockPanel.STATUS -> "Status"
-                                LockPanel.REASONS -> "Reason"
+                                LockPanel.STATUS -> "Now"
+                                LockPanel.REASONS -> "Why"
                                 LockPanel.TOOLS -> "Tools"
                             },
                             modifier = Modifier.weight(1f),
@@ -538,26 +549,28 @@ class OverlayActivity : FragmentActivity() {
                 }
 
                 Box(modifier = Modifier.weight(1f)) {
-                    when (selectedPanel.value) {
-                        LockPanel.STATUS -> LockStatusPanel(
-                            battery = battery.intValue,
-                            charging = charging.value,
-                            batteryTarget = batteryTarget,
-                            batteryColor = batteryColor,
-                            primaryMessage = primaryMessage,
-                            bypassRemainingMs = bypassRemaining.longValue,
-                            emergencyState = emergencyState
-                        )
-                        LockPanel.REASONS -> LockReasonPanel(activeReasons = activeReasons)
-                        LockPanel.TOOLS -> LockToolsPanel(
-                            torchEnabled = torchEnabled,
-                            networkLabel = network.value.label,
-                            airplaneOn = airplane.value,
-                            emergencyState = emergencyState,
-                            onTorch = { toggleTorch() },
-                            onData = { showRestrictedToggleMessage("Mobile data") },
-                            onAirplane = { showRestrictedToggleMessage("Airplane mode") }
-                        )
+                    Crossfade(targetState = selectedPanel.value, label = "lock_panel") { panel ->
+                        when (panel) {
+                            LockPanel.STATUS -> LockStatusPanel(
+                                battery = battery.intValue,
+                                charging = charging.value,
+                                batteryTarget = batteryTarget,
+                                batteryColor = batteryColor,
+                                primaryMessage = primaryMessage,
+                                bypassRemainingMs = bypassRemaining.longValue,
+                                emergencyState = emergencyState
+                            )
+                            LockPanel.REASONS -> LockReasonPanel(activeReasons = activeReasons)
+                            LockPanel.TOOLS -> LockToolsPanel(
+                                torchEnabled = torchEnabled,
+                                networkLabel = network.value.label,
+                                airplaneOn = airplane.value,
+                                emergencyState = emergencyState,
+                                onTorch = { toggleTorch() },
+                                onData = { showRestrictedToggleMessage("Mobile data") },
+                                onAirplane = { showRestrictedToggleMessage("Airplane mode") }
+                            )
+                        }
                     }
                 }
 
@@ -703,7 +716,7 @@ class OverlayActivity : FragmentActivity() {
                 Text("$battery%", color = Color.White, fontSize = 44.sp, fontWeight = FontWeight.ExtraBold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    if (charging) "Charging to unlock" else "Waiting for charge",
+                    if (charging) "Charging to unlock" else "Not charging",
                     color = Color.White.copy(alpha = 0.62f),
                     fontSize = 12.sp
                 )
@@ -729,8 +742,8 @@ class OverlayActivity : FragmentActivity() {
             Text(primaryMessage, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
             Spacer(Modifier.height(8.dp))
             Text(
-                if (charging) "Charging animation is active. Keep the charger connected until the unlock target is reached."
-                else "Animation is dormant because the device is not charging. Connect a charger to wake the charging animation.",
+                if (charging) "Keep the charger connected until the target is reached."
+                else "Connect a charger to start unlock progress.",
                 color = Color.White.copy(alpha = 0.70f),
                 fontSize = 12.sp,
                 lineHeight = 18.sp
@@ -742,8 +755,8 @@ class OverlayActivity : FragmentActivity() {
             }
             Spacer(Modifier.height(10.dp))
             Text(
-                if (charging) "Charging detected. BatteryGuard will release once the battery reaches the target and other rules are clear."
-                else "No charging source detected. Device remains locked until charging starts and the target is reached.",
+                if (charging) "BatteryGuard releases after the target is reached and all other reasons clear."
+                else "No charger detected. Device stays locked until charging begins.",
                 color = Color.White.copy(alpha = 0.72f),
                 fontSize = 12.sp,
                 lineHeight = 18.sp
@@ -763,7 +776,7 @@ class OverlayActivity : FragmentActivity() {
         GlassCard(accent = AlertOrange, stronger = true, modifier = Modifier.fillMaxSize()) {
             GlassSectionTitle(
                 title = "Lock reasons",
-                subtitle = "Tap-based lock sub-screens replace scrolling. These are the exact active reasons right now."
+                subtitle = "Lock details are grouped into focused panels for clarity."
             )
             Spacer(Modifier.height(12.dp))
             if (activeReasons.isEmpty()) {
@@ -799,7 +812,7 @@ class OverlayActivity : FragmentActivity() {
         GlassCard(accent = AuroraBlue, stronger = true, modifier = Modifier.fillMaxSize()) {
             GlassSectionTitle(
                 title = "Safe tools",
-                subtitle = "Torch is always available. Emergency pass remains available only when policy allows it."
+                subtitle = "Only safe tools remain available during lock."
             )
             Spacer(Modifier.height(12.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {

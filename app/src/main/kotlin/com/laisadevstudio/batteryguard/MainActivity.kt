@@ -13,22 +13,18 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
@@ -47,10 +43,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.fragment.app.FragmentActivity
+import com.laisadevstudio.batteryguard.ui.LocalUiAccessibility
+import com.laisadevstudio.batteryguard.ui.UiAccessibilityState
 import androidx.core.content.ContextCompat
 import com.laisadevstudio.batteryguard.ui.GlassCard
 import com.laisadevstudio.batteryguard.ui.GlassPill
@@ -67,19 +68,28 @@ import com.laisadevstudio.batteryguard.ui.theme.IceBlue
 import com.laisadevstudio.batteryguard.ui.theme.SuccessMint
 import kotlinx.coroutines.delay
 
-private enum class HomeTab(val title: String, val icon: Int) {
-    DASHBOARD("Dashboard", R.drawable.ic_shield_lock),
-    BATTERY("Battery", R.drawable.ic_battery_shield),
-    KEEPSAFE("KeepSafe", R.drawable.ic_lock),
-    SECURITY("Emergency", R.drawable.ic_warning),
-    DIAGNOSTICS("Diagnostics", R.drawable.ic_check)
+private enum class HomeTab(val title: String) {
+    DASHBOARD("Dashboard"),
+    BATTERY("Battery"),
+    KEEPSAFE("KeepSafe"),
+    SECURITY("Emergency"),
+    DIAGNOSTICS("Diagnostics")
 }
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private lateinit var dpm: DevicePolicyManager
     private lateinit var adminComponent: ComponentName
     private var permRefreshTick by mutableIntStateOf(0)
+    private lateinit var settingsPrompt: BiometricPrompt
+    private lateinit var settingsPromptInfo: BiometricPrompt.PromptInfo
+    private val settingsAuthenticators: Int by lazy {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        } else {
+            BiometricManager.Authenticators.BIOMETRIC_WEAK
+        }
+    }
 
     private val notifPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -107,9 +117,24 @@ class MainActivity : ComponentActivity() {
             notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
+        setupSettingsPrompt()
+
         setContent {
+            val reducedTransparency = remember { mutableStateOf(AppPrefs.isReducedTransparencyEnabled(this@MainActivity)) }
             BatteryGuardTheme {
-                MainScreen()
+                CompositionLocalProvider(
+                    LocalUiAccessibility provides UiAccessibilityState(
+                        reduceTransparency = reducedTransparency.value
+                    )
+                ) {
+                    MainScreen(
+                        reducedTransparency = reducedTransparency.value,
+                        onReducedTransparencyChanged = {
+                            reducedTransparency.value = it
+                            AppPrefs.setReducedTransparencyEnabled(this@MainActivity, it)
+                        }
+                    )
+                }
             }
         }
     }
@@ -117,6 +142,51 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         permRefreshTick++
+    }
+
+    private fun setupSettingsPrompt() {
+        settingsPrompt = BiometricPrompt(
+            this,
+            ContextCompat.getMainExecutor(this),
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    super.onAuthenticationSucceeded(result)
+                    AppPrefs.startSettingsUnlock(this@MainActivity)
+                    permRefreshTick++
+                    showToast("Settings unlocked for 5 minutes")
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    super.onAuthenticationError(errorCode, errString)
+                    if (errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON &&
+                        errorCode != BiometricPrompt.ERROR_USER_CANCELED &&
+                        errorCode != BiometricPrompt.ERROR_CANCELED) {
+                        showToast(errString.toString())
+                    }
+                }
+            }
+        )
+        settingsPromptInfo = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Unlock BatteryGuard settings")
+            .setSubtitle("Authenticate to change protection rules and schedules")
+            .setConfirmationRequired(false)
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    setAllowedAuthenticators(settingsAuthenticators)
+                } else {
+                    setNegativeButtonText("Cancel")
+                }
+            }
+            .build()
+    }
+
+    private fun requestSettingsUnlock() {
+        val status = BiometricManager.from(this).canAuthenticate(settingsAuthenticators)
+        if (status == BiometricManager.BIOMETRIC_SUCCESS) {
+            settingsPrompt.authenticate(settingsPromptInfo)
+        } else {
+            showToast("Biometric or device credential unavailable")
+        }
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
@@ -199,7 +269,10 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun MainScreen() {
+    private fun MainScreen(
+        reducedTransparency: Boolean,
+        onReducedTransparencyChanged: (Boolean) -> Unit
+    ) {
         val tick = permRefreshTick
         val isAdmin = remember(tick) { dpm.isAdminActive(adminComponent) }
         val hasOverlay = remember(tick) { Settings.canDrawOverlays(this) }
@@ -232,6 +305,8 @@ class MainActivity : ComponentActivity() {
         val activeReasons = remember { mutableStateOf(BatteryGuardService.activeReasons.toList()) }
         val bypassRemaining = remember { mutableLongStateOf(AppPrefs.getEmergencyBypassRemainingMs(this)) }
         val network = remember { mutableStateOf(DeviceTools.getNetworkSnapshot(this)) }
+        val settingsUnlockRemaining = remember { mutableLongStateOf(AppPrefs.getSettingsUnlockRemainingMs(this)) }
+        val underlyingReasons = remember { mutableStateOf(BatteryGuardService.underlyingReasonsLive.toList()) }
 
         LaunchedEffect(Unit) {
             while (true) {
@@ -239,7 +314,9 @@ class MainActivity : ComponentActivity() {
                 charging.value = BatteryGuardService.isCharging
                 usageToday.intValue = AppPrefs.getTodayUsageMinutes(this@MainActivity)
                 activeReasons.value = BatteryGuardService.activeReasons.toList()
+                underlyingReasons.value = BatteryGuardService.underlyingReasonsLive.toList()
                 bypassRemaining.longValue = AppPrefs.getEmergencyBypassRemainingMs(this@MainActivity)
+                settingsUnlockRemaining.longValue = AppPrefs.getSettingsUnlockRemainingMs(this@MainActivity)
                 network.value = DeviceTools.getNetworkSnapshot(this@MainActivity)
                 delay(1_000L)
             }
@@ -254,10 +331,17 @@ class MainActivity : ComponentActivity() {
         val usageProgress = if (dailyLimit.intValue > 0) {
             usageToday.intValue.toFloat() / dailyLimit.intValue.toFloat()
         } else 0f
-        val emergencyState = remember(battery.intValue, activeReasons.value, bypassRemaining.longValue) {
-            GuardRules.emergencyPassState(this@MainActivity, battery.intValue, activeReasons.value.toSet())
+        val emergencyState = remember(battery.intValue, underlyingReasons.value, bypassRemaining.longValue) {
+            GuardRules.emergencyPassState(this@MainActivity, battery.intValue, underlyingReasons.value.toSet())
         }
         val currentSessionId = AppPrefs.getCurrentLockSessionId(this)
+        val appLockActive = remember(currentSessionId, underlyingReasons.value, bypassRemaining.longValue) {
+            currentSessionId != 0L && (underlyingReasons.value.isNotEmpty() || bypassRemaining.longValue > 0L)
+        }
+        val settingsUnlocked = remember(settingsUnlockRemaining.longValue) {
+            settingsUnlockRemaining.longValue > 0L
+        }
+        var showOnboarding by remember { mutableStateOf(!AppPrefs.isOnboardingDone(this@MainActivity)) }
         var selectedScreen by remember { mutableStateOf(HomeTab.DASHBOARD) }
 
         Box(
@@ -277,103 +361,132 @@ class MainActivity : ComponentActivity() {
             Column(modifier = Modifier.fillMaxSize()) {
                 AppMenuBar(
                     selectedScreen = selectedScreen,
-                    battery = battery.intValue,
                     charging = charging.value,
                     onSelect = { selectedScreen = it }
                 )
-                MainPage(
-                    tab = selectedScreen,
-                    battery = battery.intValue,
-                    charging = charging.value,
-                    protectionEnabled = protectionEnabled.value,
-                    protectionStrength = protectionStrength,
-                    usageToday = usageToday.intValue,
-                    usageLimit = dailyLimit.intValue,
-                    dailyLimitEnabled = dailyLimitEnabled.value,
-                    activeReasons = activeReasons.value,
-                    bypassRemainingMs = bypassRemaining.longValue,
-                    networkLabel = network.value.label,
-                    isAdmin = isAdmin,
-                    hasOverlay = hasOverlay,
-                    hasA11y = hasA11y,
-                    hasNotifPerm = hasNotifPerm,
-                    ignoresBatteryOpt = ignoresBatteryOpt,
-                    isDeviceOwner = isDeviceOwner,
-                    isDefaultHome = isDefaultHome,
-                    batteryEnabled = batteryEnabled.value,
-                    scheduleEnabled = scheduleEnabled.value,
-                    threshold = threshold.intValue,
-                    warnMargin = warnMargin.intValue,
-                    window1 = window1.value,
-                    window2 = window2.value,
-                    bedtime = bedtime.value,
-                    dangerousSettingsLocked = dangerousSettingsLocked,
-                    batterySettingsLocked = batterySettingsLocked,
-                    emergencyState = emergencyState,
-                    currentSessionId = currentSessionId,
-                    onPreview = { launchPreviewOverlay() },
-                    onResetUsage = {
-                        AppPrefs.resetUsageToday(this@MainActivity)
-                        usageToday.intValue = 0
-                        BatteryGuardService.requestRefresh(this@MainActivity)
+                Crossfade(
+                    targetState = when {
+                        appLockActive -> "lock"
+                        showOnboarding -> "onboarding"
+                        else -> "content"
                     },
-                    onAdmin = { openDeviceAdminSettings() },
-                    onOverlay = { openOverlaySettings() },
-                    onA11y = { openAccessibilitySettings() },
-                    onNotif = { openNotificationPermission() },
-                    onBatteryOpt = { openBatteryOptimizationSettings() },
-                    onProtectionEnabled = {
-                        protectionEnabled.value = it
-                        AppPrefs.setProtectionEnabled(this@MainActivity, it)
-                        BatteryGuardService.requestRefresh(this@MainActivity)
-                    },
-                    onBatteryEnabled = {
-                        batteryEnabled.value = it
-                        AppPrefs.setBatteryProtectionEnabled(this@MainActivity, it)
-                        BatteryGuardService.requestRefresh(this@MainActivity)
-                    },
-                    onScheduleEnabled = {
-                        scheduleEnabled.value = it
-                        AppPrefs.setScheduleProtectionEnabled(this@MainActivity, it)
-                        BatteryGuardService.requestRefresh(this@MainActivity)
-                    },
-                    onDailyLimitEnabled = {
-                        dailyLimitEnabled.value = it
-                        AppPrefs.setDailyUsageLimitEnabled(this@MainActivity, it)
-                        BatteryGuardService.requestRefresh(this@MainActivity)
-                    },
-                    onThresholdChanged = {
-                        threshold.intValue = it
-                        AppPrefs.setThreshold(this@MainActivity, it)
-                        BatteryGuardService.requestRefresh(this@MainActivity)
-                    },
-                    onWarnMarginChanged = {
-                        warnMargin.intValue = it
-                        AppPrefs.setWarnMargin(this@MainActivity, it)
-                        BatteryGuardService.requestRefresh(this@MainActivity)
-                    },
-                    onDailyLimitChanged = {
-                        dailyLimit.intValue = it
-                        AppPrefs.setDailyUsageLimitMinutes(this@MainActivity, it)
-                        BatteryGuardService.requestRefresh(this@MainActivity)
-                    },
-                    onWindow1Changed = {
-                        window1.value = it
-                        AppPrefs.setWindow1(this@MainActivity, it)
-                        BatteryGuardService.requestRefresh(this@MainActivity)
-                    },
-                    onWindow2Changed = {
-                        window2.value = it
-                        AppPrefs.setWindow2(this@MainActivity, it)
-                        BatteryGuardService.requestRefresh(this@MainActivity)
-                    },
-                    onBedtimeChanged = {
-                        bedtime.value = it
-                        AppPrefs.setBedtimeWindow(this@MainActivity, it)
-                        BatteryGuardService.requestRefresh(this@MainActivity)
-                    },
-                    onPickTime = { initial, callback -> pickTime(initial, callback) }
-                )
+                    label = "main_state"
+                ) { state ->
+                    when (state) {
+                        "lock" -> AppSelfProtectionScreen(
+                            reasons = underlyingReasons.value,
+                            bypassRemainingMs = bypassRemaining.longValue,
+                            battery = battery.intValue,
+                            unlockFloor = GuardRules.batteryUnlockTarget(this@MainActivity)
+                        )
+                        "onboarding" -> OnboardingScreen(
+                            reduceTransparency = reducedTransparency,
+                            onReducedTransparencyChanged = onReducedTransparencyChanged,
+                            onContinue = {
+                                AppPrefs.setOnboardingDone(this@MainActivity, true)
+                                showOnboarding = false
+                            }
+                        )
+                        else -> MainPage(
+                            tab = selectedScreen,
+                            battery = battery.intValue,
+                            charging = charging.value,
+                            protectionEnabled = protectionEnabled.value,
+                            protectionStrength = protectionStrength,
+                            usageToday = usageToday.intValue,
+                            usageLimit = dailyLimit.intValue,
+                            dailyLimitEnabled = dailyLimitEnabled.value,
+                            activeReasons = activeReasons.value,
+                            bypassRemainingMs = bypassRemaining.longValue,
+                            networkLabel = network.value.label,
+                            isAdmin = isAdmin,
+                            hasOverlay = hasOverlay,
+                            hasA11y = hasA11y,
+                            hasNotifPerm = hasNotifPerm,
+                            ignoresBatteryOpt = ignoresBatteryOpt,
+                            isDeviceOwner = isDeviceOwner,
+                            isDefaultHome = isDefaultHome,
+                            batteryEnabled = batteryEnabled.value,
+                            scheduleEnabled = scheduleEnabled.value,
+                            threshold = threshold.intValue,
+                            warnMargin = warnMargin.intValue,
+                            window1 = window1.value,
+                            window2 = window2.value,
+                            bedtime = bedtime.value,
+                            dangerousSettingsLocked = dangerousSettingsLocked || !settingsUnlocked,
+                            batterySettingsLocked = batterySettingsLocked,
+                            emergencyState = emergencyState,
+                            currentSessionId = currentSessionId,
+                            onPreview = { launchPreviewOverlay() },
+                            onResetUsage = {
+                                AppPrefs.resetUsageToday(this@MainActivity)
+                                usageToday.intValue = 0
+                                BatteryGuardService.requestRefresh(this@MainActivity)
+                            },
+                            onAdmin = { openDeviceAdminSettings() },
+                            onOverlay = { openOverlaySettings() },
+                            onA11y = { openAccessibilitySettings() },
+                            onNotif = { openNotificationPermission() },
+                            onBatteryOpt = { openBatteryOptimizationSettings() },
+                            onProtectionEnabled = {
+                                protectionEnabled.value = it
+                                AppPrefs.setProtectionEnabled(this@MainActivity, it)
+                                BatteryGuardService.requestRefresh(this@MainActivity)
+                            },
+                            onBatteryEnabled = {
+                                batteryEnabled.value = it
+                                AppPrefs.setBatteryProtectionEnabled(this@MainActivity, it)
+                                BatteryGuardService.requestRefresh(this@MainActivity)
+                            },
+                            onScheduleEnabled = {
+                                scheduleEnabled.value = it
+                                AppPrefs.setScheduleProtectionEnabled(this@MainActivity, it)
+                                BatteryGuardService.requestRefresh(this@MainActivity)
+                            },
+                            onDailyLimitEnabled = {
+                                dailyLimitEnabled.value = it
+                                AppPrefs.setDailyUsageLimitEnabled(this@MainActivity, it)
+                                BatteryGuardService.requestRefresh(this@MainActivity)
+                            },
+                            onThresholdChanged = {
+                                threshold.intValue = it
+                                AppPrefs.setThreshold(this@MainActivity, it)
+                                BatteryGuardService.requestRefresh(this@MainActivity)
+                            },
+                            onWarnMarginChanged = {
+                                warnMargin.intValue = it
+                                AppPrefs.setWarnMargin(this@MainActivity, it)
+                                BatteryGuardService.requestRefresh(this@MainActivity)
+                            },
+                            onDailyLimitChanged = {
+                                dailyLimit.intValue = it
+                                AppPrefs.setDailyUsageLimitMinutes(this@MainActivity, it)
+                                BatteryGuardService.requestRefresh(this@MainActivity)
+                            },
+                            onWindow1Changed = {
+                                window1.value = it
+                                AppPrefs.setWindow1(this@MainActivity, it)
+                                BatteryGuardService.requestRefresh(this@MainActivity)
+                            },
+                            onWindow2Changed = {
+                                window2.value = it
+                                AppPrefs.setWindow2(this@MainActivity, it)
+                                BatteryGuardService.requestRefresh(this@MainActivity)
+                            },
+                            onBedtimeChanged = {
+                                bedtime.value = it
+                                AppPrefs.setBedtimeWindow(this@MainActivity, it)
+                                BatteryGuardService.requestRefresh(this@MainActivity)
+                            },
+                            onPickTime = { initial, callback -> pickTime(initial, callback) },
+                            settingsUnlocked = settingsUnlocked,
+                            settingsUnlockRemainingMs = settingsUnlockRemaining.longValue,
+                            onRequestSettingsUnlock = { requestSettingsUnlock() },
+                            reducedTransparency = reducedTransparency,
+                            onReducedTransparencyChanged = onReducedTransparencyChanged
+                        )
+                    }
+                }
             }
         }
     }
@@ -426,7 +539,12 @@ class MainActivity : ComponentActivity() {
         onWindow1Changed: (TimeWindow) -> Unit,
         onWindow2Changed: (TimeWindow) -> Unit,
         onBedtimeChanged: (TimeWindow) -> Unit,
-        onPickTime: (Int, (Int) -> Unit) -> Unit
+        onPickTime: (Int, (Int) -> Unit) -> Unit,
+        settingsUnlocked: Boolean,
+        settingsUnlockRemainingMs: Long,
+        onRequestSettingsUnlock: () -> Unit,
+        reducedTransparency: Boolean,
+        onReducedTransparencyChanged: (Boolean) -> Unit
     ) {
         PageContainer {
             when (tab) {
@@ -465,6 +583,12 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 HomeTab.BATTERY -> {
+                    if (!settingsUnlocked) {
+                        SettingsUnlockCard(
+                            remainingMs = settingsUnlockRemainingMs,
+                            onUnlock = onRequestSettingsUnlock
+                        )
+                    }
                     if (batterySettingsLocked) {
                         BatteryLockShieldCard(
                             battery = battery,
@@ -488,6 +612,12 @@ class MainActivity : ComponentActivity() {
                     LockRuleCard()
                 }
                 HomeTab.KEEPSAFE -> {
+                    if (!settingsUnlocked) {
+                        SettingsUnlockCard(
+                            remainingMs = settingsUnlockRemainingMs,
+                            onUnlock = onRequestSettingsUnlock
+                        )
+                    }
                     if (dangerousSettingsLocked) {
                         SessionLockedBanner(
                             title = "KeepSafe settings paused",
@@ -538,15 +668,134 @@ class MainActivity : ComponentActivity() {
                         lastUnlock = AppPrefs.getLastUnlockAt(this@MainActivity),
                         lastReason = AppPrefs.getLastLockReasons(this@MainActivity)
                     )
+                    AppearanceCard(
+                        reducedTransparency = reducedTransparency,
+                        onReducedTransparencyChanged = onReducedTransparencyChanged
+                    )
                 }
             }
         }
     }
 
     @Composable
+    private fun AppSelfProtectionScreen(
+        reasons: List<GuardReason>,
+        bypassRemainingMs: Long,
+        battery: Int,
+        unlockFloor: Int
+    ) {
+        PageContainer {
+            GlassCard(accent = AlertRed, stronger = true) {
+                GlassSectionTitle(
+                    title = "BatteryGuard is protecting its own settings",
+                    subtitle = "When BatteryGuard has an active lock session, the app itself becomes read-only. This prevents emergency pass or temporary access from weakening protection while the lock is still in force."
+                )
+                Spacer(Modifier.height(12.dp))
+                Text("Device locked. Please clear the active lock conditions before changing settings.", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                Spacer(Modifier.height(10.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    MetricBubble("Battery", "$battery%", Modifier.weight(1f), if (battery < 10) AlertRed else IceBlue)
+                    MetricBubble("Unlock floor", "$unlockFloor%", Modifier.weight(1f), SuccessMint)
+                }
+                if (reasons.isNotEmpty()) {
+                    Spacer(Modifier.height(12.dp))
+                    reasons.forEach {
+                        Text("• ${GuardRules.reasonLabel(it)} — ${GuardRules.reasonDetail(this@MainActivity, it)}", color = Color.White.copy(alpha = 0.74f), fontSize = 13.sp, lineHeight = 20.sp)
+                        Spacer(Modifier.height(4.dp))
+                    }
+                }
+                if (bypassRemainingMs > 0L) {
+                    Spacer(Modifier.height(12.dp))
+                    GlassPill("Emergency pass active • ${DeviceTools.formatDurationCompact(bypassRemainingMs)} left", accent = SuccessMint)
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun OnboardingScreen(
+        reduceTransparency: Boolean,
+        onReducedTransparencyChanged: (Boolean) -> Unit,
+        onContinue: () -> Unit
+    ) {
+        PageContainer {
+            GlassCard(accent = IceBlue, stronger = true) {
+                GlassSectionTitle(
+                    title = "Welcome to BatteryGuard",
+                    subtitle = "A simpler interface, stricter rules, and protected settings."
+                )
+                Spacer(Modifier.height(12.dp))
+                Text("• Liquid glass is restrained to key surfaces so content stays primary.", color = Color.White.copy(alpha = 0.74f), fontSize = 13.sp)
+                Text("• Emergency pass never overrides battery lock and never works below 10%.", color = Color.White.copy(alpha = 0.74f), fontSize = 13.sp)
+                Text("• When BatteryGuard is actively locking the phone, the app becomes read-only.", color = Color.White.copy(alpha = 0.74f), fontSize = 13.sp)
+                Spacer(Modifier.height(14.dp))
+                ToggleRow(
+                    title = "Reduced transparency",
+                    subtitle = "Use a more solid appearance for easier readability.",
+                    checked = reduceTransparency,
+                    onChecked = onReducedTransparencyChanged
+                )
+                Spacer(Modifier.height(14.dp))
+                FilledTonalButton(
+                    onClick = onContinue,
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = IceBlue.copy(alpha = 0.22f),
+                        contentColor = Color.White
+                    )
+                ) { Text("Continue") }
+            }
+        }
+    }
+
+    @Composable
+    private fun SettingsUnlockCard(
+        remainingMs: Long,
+        onUnlock: () -> Unit
+    ) {
+        GlassCard(accent = SuccessMint) {
+            GlassSectionTitle(
+                title = if (remainingMs > 0L) "Settings unlocked" else "Unlock critical settings",
+                subtitle = if (remainingMs > 0L) "Critical settings stay open briefly, then lock again automatically."
+                else "Authenticate before changing battery protection or schedule rules."
+            )
+            Spacer(Modifier.height(12.dp))
+            if (remainingMs > 0L) {
+                GlassPill("Unlocked for ${DeviceTools.formatDurationCompact(remainingMs)}", accent = SuccessMint)
+            } else {
+                FilledTonalButton(
+                    onClick = onUnlock,
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = SuccessMint.copy(alpha = 0.20f),
+                        contentColor = Color.White
+                    )
+                ) { Text("Unlock settings") }
+            }
+        }
+    }
+
+    @Composable
+    private fun AppearanceCard(
+        reducedTransparency: Boolean,
+        onReducedTransparencyChanged: (Boolean) -> Unit
+    ) {
+        GlassCard(accent = IceBlue) {
+            GlassSectionTitle(
+                title = "Accessibility & appearance",
+                subtitle = "Liquid glass should stay readable. Turn on reduced transparency for a calmer, more solid surface treatment."
+            )
+            Spacer(Modifier.height(12.dp))
+            ToggleRow(
+                title = "Reduced transparency",
+                subtitle = "Swap the translucent glass look for a stronger solid background.",
+                checked = reducedTransparency,
+                onChecked = onReducedTransparencyChanged
+            )
+        }
+    }
+
+    @Composable
     private fun AppMenuBar(
         selectedScreen: HomeTab,
-        battery: Int,
         charging: Boolean,
         onSelect: (HomeTab) -> Unit
     ) {
@@ -567,15 +816,17 @@ class MainActivity : ComponentActivity() {
                     Text("BatteryGuard", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "${selectedScreen.title} screen • battery $battery%${if (charging) " • charging" else ""}",
-                        color = Color.White.copy(alpha = 0.62f),
-                        fontSize = 13.sp
+                        "${selectedScreen.title} • ${if (charging) "charging" else "ready"}",
+                        color = Color.White.copy(alpha = 0.56f),
+                        fontSize = 12.sp
                     )
                 }
                 Box {
-                    IconButton(onClick = { expanded = true }) {
-                        Icon(Icons.Rounded.Menu, contentDescription = "Open menu", tint = Color.White)
-                    }
+                    GlassPill(
+                        text = "Menu",
+                        accent = IceBlue,
+                        onClick = { expanded = true }
+                    )
                     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                         HomeTab.entries.forEach { screen ->
                             DropdownMenuItem(
@@ -583,13 +834,6 @@ class MainActivity : ComponentActivity() {
                                 onClick = {
                                     expanded = false
                                     onSelect(screen)
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        painter = painterResource(screen.icon),
-                                        contentDescription = screen.title,
-                                        tint = if (screen == selectedScreen) IceBlue else Color.Unspecified
-                                    )
                                 }
                             )
                         }
@@ -638,7 +882,7 @@ class MainActivity : ComponentActivity() {
             Text("Command center", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
             Text(
-                "Liquid-glass overview for BatteryGuard, KeepSafe and emergency policy.",
+                "Battery status, protection state, and today’s limits.",
                 color = Color.White.copy(alpha = 0.62f),
                 fontSize = 13.sp,
                 lineHeight = 19.sp
@@ -712,7 +956,7 @@ class MainActivity : ComponentActivity() {
         GlassCard(accent = AlertOrange) {
             GlassSectionTitle(
                 title = "Current lock logic",
-                subtitle = "BatteryGuard now prioritizes low-battery protection. Emergency pass never overrides battery lock and never works below 10%."
+                subtitle = "Low battery always has priority. Emergency pass never overrides it."
             )
             Spacer(Modifier.height(12.dp))
             if (activeReasons.isEmpty()) {
@@ -752,7 +996,7 @@ class MainActivity : ComponentActivity() {
         GlassCard(accent = IceBlue, stronger = true) {
             GlassSectionTitle(
                 title = "Battery protection",
-                subtitle = "Battery-lock session latches the unlock floor. Once low-battery lock starts, BatteryGuard keeps that session locked until the floor is reached."
+                subtitle = "Once battery lock starts, the unlock floor stays fixed for that session."
             )
             Spacer(Modifier.height(14.dp))
             if (!enabled) {
@@ -860,7 +1104,7 @@ class MainActivity : ComponentActivity() {
         GlassCard(accent = AuroraBlue, stronger = true) {
             GlassSectionTitle(
                 title = "KeepSafe time control",
-                subtitle = "Use allowed windows, bedtime and a daily phone-time budget instead of burying all controls in one huge page."
+                subtitle = "Set allowed windows, bedtime, and a daily phone-time budget."
             )
             Spacer(Modifier.height(14.dp))
             ToggleRow(
@@ -957,7 +1201,7 @@ class MainActivity : ComponentActivity() {
         GlassCard(accent = SuccessMint, stronger = true) {
             GlassSectionTitle(
                 title = "Emergency policy",
-                subtitle = "BatteryGuard now treats emergency tools and emergency pass differently. Emergency pass is for non-battery locks only, one per session, two per day."
+                subtitle = "Emergency pass is for non-battery locks only. One per session, two per day."
             )
             Spacer(Modifier.height(12.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1073,7 +1317,7 @@ class MainActivity : ComponentActivity() {
         GlassCard(accent = AlertOrange) {
             GlassSectionTitle(
                 title = "Diagnostics dashboard",
-                subtitle = "Everything that matters at a glance — service state, permissions, launcher role, lockdown strength, and lock history."
+                subtitle = "Service state, permissions, launcher role, and lock history."
             )
             Spacer(Modifier.height(14.dp))
             DiagnosticRow("Service running", true)

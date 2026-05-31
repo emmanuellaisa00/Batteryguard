@@ -23,10 +23,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.laisadevstudio.batteryguard.ui.LocalUiAccessibility
 
-private val GlassBorder = Color.White.copy(alpha = 0.18f)
-private val GlassFill = Color.White.copy(alpha = 0.10f)
-private val GlassFillStrong = Color.White.copy(alpha = 0.16f)
+private val GlassBorder = Color.White.copy(alpha = 0.12f)
+private val GlassFill = Color.White.copy(alpha = 0.06f)
+private val GlassFillStrong = Color.White.copy(alpha = 0.10f)
 
 @Composable
 fun GlassCard(
@@ -35,26 +36,32 @@ fun GlassCard(
     stronger: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val accessibility = LocalUiAccessibility.current
+    val cardColor = when {
+        accessibility.reduceTransparency && stronger -> Color(0xFF132537)
+        accessibility.reduceTransparency -> Color(0xFF10202F)
+        stronger -> GlassFillStrong
+        else -> GlassFill
+    }
+    val overlayAlpha = if (accessibility.reduceTransparency) 0.03f else if (stronger) 0.06f else 0.045f
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (stronger) GlassFillStrong else GlassFill
-        ),
-        border = BorderStroke(1.dp, GlassBorder.copy(alpha = 0.7f))
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(containerColor = cardColor),
+        border = BorderStroke(1.dp, GlassBorder.copy(alpha = if (accessibility.reduceTransparency) 0.18f else 0.6f))
     ) {
         Box(
             modifier = Modifier
                 .background(
                     Brush.linearGradient(
                         listOf(
-                            accent.copy(alpha = 0.10f),
-                            Color.White.copy(alpha = 0.02f),
+                            accent.copy(alpha = overlayAlpha),
+                            Color.White.copy(alpha = 0.015f),
                             Color.Transparent
                         )
                     )
                 )
-                .padding(18.dp)
+                .padding(20.dp)
         ) {
             Column(content = content)
         }
@@ -69,6 +76,7 @@ fun GlassPill(
     active: Boolean = true,
     onClick: (() -> Unit)? = null
 ) {
+    val accessibility = LocalUiAccessibility.current
     Surface(
         modifier = modifier
             .clip(RoundedCornerShape(50))
@@ -79,7 +87,11 @@ fun GlassPill(
                     onClick = onClick
                 ) else Modifier
             ),
-        color = if (active) accent.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.07f),
+        color = if (accessibility.reduceTransparency) {
+            if (active) Color(0xFF173047) else Color(0xFF10202F)
+        } else {
+            if (active) accent.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.06f)
+        },
         border = BorderStroke(1.dp, Color.White.copy(alpha = if (active) 0.22f else 0.10f)),
         shape = RoundedCornerShape(50)
     ) {
@@ -102,14 +114,14 @@ fun MetricBubble(
 ) {
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(18.dp))
             .background(accent.copy(alpha = 0.10f))
-            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(20.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(18.dp))
             .padding(horizontal = 14.dp, vertical = 12.dp)
     ) {
         Text(label, color = Color.White.copy(alpha = 0.58f), fontSize = 11.sp)
         Spacer(Modifier.height(4.dp))
-        Text(value, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text(value, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -120,7 +132,7 @@ fun GlassSectionTitle(
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
-        Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+        Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 17.sp)
         Spacer(Modifier.height(4.dp))
         Text(subtitle, color = Color.White.copy(alpha = 0.58f), fontSize = 12.sp, lineHeight = 18.sp)
     }

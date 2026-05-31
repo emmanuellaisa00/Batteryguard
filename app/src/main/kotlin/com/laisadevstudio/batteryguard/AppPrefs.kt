@@ -47,6 +47,9 @@ object AppPrefs {
     private const val KEY_LAST_LOCK_REASONS = "last_lock_reasons"
 
     private const val KEY_CURRENT_LOCK_SESSION_ID = "current_lock_session_id"
+    private const val KEY_SETTINGS_UNLOCK_UNTIL = "settings_unlock_until"
+    private const val KEY_REDUCED_TRANSPARENCY = "reduced_transparency"
+    private const val KEY_ONBOARDING_DONE = "onboarding_done"
     private const val KEY_BATTERY_LOCK_LATCHED = "battery_lock_latched"
     private const val KEY_BATTERY_THRESHOLD_AT_LOCK = "battery_threshold_at_lock"
     private const val KEY_BATTERY_UNLOCK_FLOOR_AT_LOCK = "battery_unlock_floor_at_lock"
@@ -56,6 +59,7 @@ object AppPrefs {
     private const val DEFAULT_DAILY_LIMIT_MINUTES = 120
     private const val MAX_EMERGENCY_PASSES_PER_DAY = 2
     const val EMERGENCY_PASS_DURATION_MS = 2 * 60 * 1000L
+    const val SETTINGS_UNLOCK_DURATION_MS = 5 * 60 * 1000L
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -113,6 +117,20 @@ object AppPrefs {
 
     fun setDailyUsageLimitEnabled(context: Context, enabled: Boolean) {
         edit(context).putBoolean(KEY_DAILY_LIMIT_ENABLED, enabled).apply()
+    }
+
+    fun isReducedTransparencyEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_REDUCED_TRANSPARENCY, false)
+
+    fun setReducedTransparencyEnabled(context: Context, enabled: Boolean) {
+        edit(context).putBoolean(KEY_REDUCED_TRANSPARENCY, enabled).apply()
+    }
+
+    fun isOnboardingDone(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_ONBOARDING_DONE, false)
+
+    fun setOnboardingDone(context: Context, done: Boolean) {
+        edit(context).putBoolean(KEY_ONBOARDING_DONE, done).apply()
     }
 
     // ── Battery rules ─────────────────────────────────────────────────────────
@@ -247,6 +265,22 @@ object AppPrefs {
 
     fun clearLockSession(context: Context) {
         edit(context).putLong(KEY_CURRENT_LOCK_SESSION_ID, 0L).apply()
+    }
+
+    fun startSettingsUnlock(context: Context, durationMs: Long = SETTINGS_UNLOCK_DURATION_MS) {
+        edit(context).putLong(KEY_SETTINGS_UNLOCK_UNTIL, System.currentTimeMillis() + durationMs).apply()
+    }
+
+    fun clearSettingsUnlock(context: Context) {
+        edit(context).putLong(KEY_SETTINGS_UNLOCK_UNTIL, 0L).apply()
+    }
+
+    fun isSettingsUnlocked(context: Context): Boolean =
+        getSettingsUnlockRemainingMs(context) > 0L
+
+    fun getSettingsUnlockRemainingMs(context: Context): Long {
+        val until = prefs(context).getLong(KEY_SETTINGS_UNLOCK_UNTIL, 0L)
+        return (until - System.currentTimeMillis()).coerceAtLeast(0L)
     }
 
     // ── Emergency bypass ──────────────────────────────────────────────────────
